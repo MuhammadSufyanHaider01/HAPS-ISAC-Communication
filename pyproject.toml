@@ -25,6 +25,11 @@ data = [
   "pandas>=2.2",
   "pyarrow>=17.0",
 ]
+teacher = [
+  "accelerate==1.14.0",
+  "Pillow==12.3.0",
+  "transformers==5.15.1",
+]
 config = [
   "hydra-core>=1.3",
 ]

@@ -1,7 +1,7 @@
 schema_version: 1
 provider: qwen
 model_id: Qwen/Qwen3.5-27B
-model_revision: main
+model_revision: fc05daec18b0a78c049392ed2e771dde82bdf654
 base_url: http://127.0.0.1:8000/v1
 api_key_env: HAPS_TEACHER_API_KEY
 prompt_version: "1.0"

@@ -8,6 +8,8 @@ import subprocess
 import sys
 import uuid
 from dataclasses import fields
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Any
 
@@ -92,21 +94,79 @@ def _git_metadata() -> tuple[str, bool]:
         return "unknown", True
 
 
+def _nvidia_metadata() -> dict[str, Any]:
+    try:
+        output = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,uuid,driver_version,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ) as error:
+        return {"available": False, "error": f"{type(error).__name__}: {error}"}
+    devices: list[dict[str, str]] = []
+    fields = ("index", "name", "uuid", "driver_version", "memory_total_mib")
+    for line in output.splitlines():
+        values = [value.strip() for value in line.split(",")]
+        if len(values) == len(fields):
+            devices.append(dict(zip(fields, values, strict=True)))
+    return {"available": bool(devices), "devices": devices}
+
+
 def _hardware_metadata() -> dict[str, Any]:
     return {
         "hostname": platform.node(),
         "machine": platform.machine(),
         "processor": platform.processor(),
-        "slurm_partition": os.environ.get("SLURM_JOB_PARTITION"),
+        "slurm": {
+            "job_id": os.environ.get("SLURM_JOB_ID"),
+            "job_name": os.environ.get("SLURM_JOB_NAME"),
+            "partition": os.environ.get("SLURM_JOB_PARTITION"),
+            "node_list": os.environ.get("SLURM_JOB_NODELIST"),
+            "job_gpus": os.environ.get("SLURM_JOB_GPUS"),
+            "cpus_per_task": os.environ.get("SLURM_CPUS_PER_TASK"),
+        },
+        "teacher_backend": os.environ.get("HAPS_TEACHER_BACKEND"),
+        "python_environment": os.environ.get("HAPS_PYTHON_ENVIRONMENT"),
+        "loaded_modules": os.environ.get("LOADEDMODULES"),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "nvidia": _nvidia_metadata(),
     }
 
 
 def _software_metadata() -> dict[str, Any]:
+    packages: dict[str, str | None] = {}
+    for package in (
+        "torch",
+        "torchvision",
+        "Pillow",
+        "vllm",
+        "transformers",
+        "pandas",
+        "pyarrow",
+        "scipy",
+        "gymnasium",
+        "pydantic",
+        "PyYAML",
+    ):
+        try:
+            packages[package] = package_version(package)
+        except PackageNotFoundError:
+            packages[package] = None
     return {
         "python": sys.version,
         "numpy": np.__version__,
         "platform": platform.platform(),
+        "packages": packages,
     }
 
 

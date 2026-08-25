@@ -11,11 +11,13 @@ from haps_isac.config import load_config
 from haps_isac.data.audit import audit_dataset
 from haps_isac.data.dataset_loader import DatasetLoader
 from haps_isac.data.generation import generate_demonstrations
+from haps_isac.data.split_manager import DEFAULT_SPLIT_FRACTIONS
 from haps_isac.envs.haps_isac_env import HapsIsacEnv
 from haps_isac.teachers.base_teacher import MockTeacher, TeacherRequest, load_teacher_config
 from haps_isac.teachers.benchmark import run_tournament
 from haps_isac.teachers.prompt_builder import build_teacher_prompt
 from haps_isac.teachers.query_cache import QueryCache, cache_key_for
+from haps_isac.teachers.qwen_teacher import QwenTeacher
 from haps_isac.teachers.response_parser import (
     TeacherResponseError,
     parse_teacher_response,
@@ -46,6 +48,11 @@ def _mock_response(state_id: str, count: int, pairs: int) -> str:
         for index in range(count)
     ]
     return json.dumps({"schema_version": 1, "state_id": state_id, "candidates": candidates})
+
+
+def test_default_dataset_split_matches_plan() -> None:
+    fractions = DEFAULT_SPLIT_FRACTIONS
+    assert (fractions.train, fractions.validation, fractions.test) == (0.7, 0.15, 0.15)
 
 
 def test_prompt_is_deterministic_and_causal() -> None:
@@ -79,6 +86,20 @@ def test_response_parser_enforces_identity_count_and_bounds() -> None:
     invalid["candidates"][0]["eta_near"] = 0.9
     with pytest.raises(TeacherResponseError):
         parse_teacher_response(json.dumps(invalid), "s", 4, 4)
+
+
+def test_teacher_request_id_is_forwarded_for_server_telemetry() -> None:
+    config = load_teacher_config("configs/teacher.yaml")
+    request = TeacherRequest(
+        request_id="state-1:request-000",
+        state_id="state-1",
+        prompt="test prompt",
+        prompt_hash="a" * 64,
+        seed=17,
+    )
+    body = QwenTeacher(config)._request_body(request)
+    assert body["user"] == request.request_id
+    assert body["seed"] == request.seed
 
 
 def test_query_cache_is_content_addressed(tmp_path: pytest.TempPathFactory) -> None:
@@ -182,6 +203,12 @@ def test_mock_generation_writes_loadable_linked_tables(tmp_path: pytest.TempPath
         "selections": 2,
         "demonstrations": 2,
     }
+    for table_name in manifest.table_counts:
+        first_line = (output / f"{table_name}.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        record = json.loads(first_line)
+        assert record["schema_version"] == 2
+        assert record["logged_at"].endswith("+00:00")
+    assert "torch" in manifest.software["packages"]
     loader = DatasetLoader(output)
     demonstrations = loader.demonstrations()
     assert len(demonstrations) == 2

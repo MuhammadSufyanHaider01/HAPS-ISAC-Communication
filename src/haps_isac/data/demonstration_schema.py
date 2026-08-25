@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 from pydantic import BaseModel
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utc_now() -> str:
@@ -91,6 +91,7 @@ class StateLogRecord:
     observation: dict[str, Any]
     state_metrics: dict[str, Any]
     verifier_only: dict[str, Any]
+    logged_at: str = field(default_factory=utc_now)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +121,7 @@ class TeacherRequestLog:
     prompt: str
     raw_response: str
     reasoning_response: str | None
+    logged_at: str = field(default_factory=utc_now)
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +158,7 @@ class CandidateLogRecord:
     quality_weight: float
     selected: bool
     rejection_reason: str | None
+    logged_at: str = field(default_factory=utc_now)
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +172,7 @@ class RolloutLogRecord:
     retained_trajectory: bool
     metrics: dict[str, Any]
     trajectory: tuple[dict[str, Any], ...]
+    logged_at: str = field(default_factory=utc_now)
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +188,7 @@ class SelectionLogRecord:
     oracle_regret: float | None
     acceptance_status: str
     acceptance_reason: str
+    logged_at: str = field(default_factory=utc_now)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,3 +207,4 @@ class DemonstrationRecord:
     repair_distance: float
     fallback_used: bool
     selection_uncertain: bool
+    logged_at: str = field(default_factory=utc_now)

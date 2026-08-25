@@ -143,6 +143,7 @@ class OpenAICompatibleTeacher(BaseTeacher):
             "presence_penalty": self.config.sampling.presence_penalty,
             "seed": request.seed,
             "response_format": {"type": "json_object"},
+            "user": request.request_id,
         }
         body.update(self.request_overrides())
         return body

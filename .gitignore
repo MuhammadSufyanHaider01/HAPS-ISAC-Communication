@@ -11,6 +11,8 @@ htmlcov/
 
 # Environments and local configuration
 .venv/
+.venv-gpu/
+.venv-gpu-py311-login/
 venv/
 .env
 .env.*

@@ -8,9 +8,9 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class SplitFractions:
-    train: float = 0.8
-    validation: float = 0.1
-    test: float = 0.1
+    train: float = 0.7
+    validation: float = 0.15
+    test: float = 0.15
 
     def __post_init__(self) -> None:
         values = (self.train, self.validation, self.test)

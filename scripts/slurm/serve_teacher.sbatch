@@ -5,33 +5,27 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00
+#SBATCH --output=results/haps-teacher-%j.out
 
 set -euo pipefail
+cd "${SLURM_SUBMIT_DIR}"
 
-module load cuda/12.6.2
-source .venv/bin/activate
+module load cuda/12.6.2 python/3.12.5
+python_environment="${HAPS_PYTHON_ENVIRONMENT:-.venv-gpu}"
+source "${python_environment}/bin/activate"
 
 teacher_model="${HAPS_TEACHER_MODEL:-Qwen/Qwen3.5-27B}"
-teacher_revision="${HAPS_TEACHER_REVISION:-main}"
-teacher_provider="${HAPS_TEACHER_PROVIDER:-qwen}"
-teacher_host="${HAPS_TEACHER_HOST:-0.0.0.0}"
+teacher_revision="${HAPS_TEACHER_REVISION:-fc05daec18b0a78c049392ed2e771dde82bdf654}"
+teacher_host="${HAPS_TEACHER_HOST:-127.0.0.1}"
 teacher_port="${HAPS_TEACHER_PORT:-8000}"
-tensor_parallel="${HAPS_TENSOR_PARALLEL_SIZE:-1}"
-max_model_length="${HAPS_MAX_MODEL_LENGTH:-4096}"
-gpu_utilization="${HAPS_GPU_MEMORY_UTILIZATION:-0.90}"
+cache_root="${HAPS_CACHE_ROOT:-/home/muhammadsufyan.haide/.cache/haps-isac}"
 
-server_args=(
-  serve "${teacher_model}"
-  --revision "${teacher_revision}"
-  --host "${teacher_host}"
+export HF_HOME="${HF_HOME:-${cache_root}/huggingface}"
+export HF_HUB_OFFLINE="${HAPS_HF_HUB_OFFLINE:-1}"
+mkdir -p "${HF_HOME}"
+
+exec "${python_environment}/bin/python" scripts/serve_transformers_teacher.py \
+  --model "${teacher_model}" \
+  --revision "${teacher_revision}" \
+  --host "${teacher_host}" \
   --port "${teacher_port}"
-  --tensor-parallel-size "${tensor_parallel}"
-  --max-model-len "${max_model_length}"
-  --gpu-memory-utilization "${gpu_utilization}"
-)
-
-if [[ "${teacher_provider}" == "qwen" ]]; then
-  server_args+=(--enable-reasoning --reasoning-parser qwen3)
-fi
-
-exec vllm "${server_args[@]}"
