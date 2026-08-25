@@ -323,16 +323,21 @@ class HapsIsacEnv(gym.Env[dict[str, np.ndarray], dict[str, Any]]):
     def _evaluate_sensing(
         self,
         executable: Any,
-    ) -> tuple[SensingResult, SensingJob | None, np.ndarray, np.ndarray, float]:
+    ) -> tuple[
+        SensingResult,
+        SensingJob | None,
+        np.ndarray,
+        np.ndarray,
+        float,
+        float | None,
+    ]:
         if self._streams is None:
             raise RuntimeError("random streams are not initialized")
         config = self.config
         state = self.state
         physical = executable.physical
         haps_position = np.asarray(config.haps.position_m, dtype=np.float64)
-        true_position = np.asarray(
-            [state.target_true_state[0], state.target_true_state[1], 0.0]
-        )
+        true_position = np.asarray([state.target_true_state[0], state.target_true_state[1], 0.0])
         actual_angle = azimuth_rad(haps_position, true_position)
         target_steering = ula_steering(
             config.haps.num_tx_antennas,
@@ -367,12 +372,20 @@ class HapsIsacEnv(gym.Env[dict[str, np.ndarray], dict[str, Any]]):
         posterior_covariance = state.hidden_filter_covariance.copy()
         job: SensingJob | None = None
         compute_energy = 0.0
+        sensing_nis: float | None = None
         if sensing.detected:
             measurement = sample_measurement(
                 state.target_true_state,
                 haps_position,
                 sensing.measurement_covariance,
                 self._streams["sensing"],
+            )
+            sensing_nis = ekf.normalized_innovation_squared(
+                posterior_mean,
+                posterior_covariance,
+                measurement,
+                sensing.measurement_covariance,
+                haps_position,
             )
             posterior_mean, posterior_covariance = ekf.update(
                 posterior_mean,
@@ -391,17 +404,21 @@ class HapsIsacEnv(gym.Env[dict[str, np.ndarray], dict[str, Any]]):
                 config.haps.sensing_cycles,
                 physical.cpu_frequency_hz,
             )
-            if (
-                float(np.trace(posterior_covariance))
-                <= config.sensing.acceptance_covariance_trace
-            ):
+            if float(np.trace(posterior_covariance)) <= config.sensing.acceptance_covariance_trace:
                 job = SensingJob(
                     timestamp=state.slot,
                     ready_slot=state.slot + delay,
                     posterior_mean=posterior_mean.copy(),
                     posterior_covariance=posterior_covariance.copy(),
                 )
-        return sensing, job, posterior_mean, posterior_covariance, compute_energy
+        return (
+            sensing,
+            job,
+            posterior_mean,
+            posterior_covariance,
+            compute_energy,
+            sensing_nis,
+        )
 
     def _release_sensing_jobs(
         self,
@@ -489,6 +506,7 @@ class HapsIsacEnv(gym.Env[dict[str, np.ndarray], dict[str, Any]]):
             hidden_posterior_mean,
             hidden_posterior_covariance,
             compute_energy,
+            sensing_nis,
         ) = self._evaluate_sensing(executable)
 
         physical = executable.physical
@@ -611,6 +629,8 @@ class HapsIsacEnv(gym.Env[dict[str, np.ndarray], dict[str, Any]]):
             secrecy_outage,
             increments,
             covariance_trace,
+            compute_energy,
+            sensing_nis,
             accepted_job,
         )
         return observation, stage_cost.reward, False, truncated, info
@@ -626,6 +646,8 @@ class HapsIsacEnv(gym.Env[dict[str, np.ndarray], dict[str, Any]]):
         secrecy_outage: np.ndarray,
         increments: np.ndarray,
         covariance_trace: float,
+        compute_energy: float,
+        sensing_nis: float | None,
         accepted_job: SensingJob | None,
     ) -> dict[str, Any]:
         config = self.config
@@ -637,6 +659,27 @@ class HapsIsacEnv(gym.Env[dict[str, np.ndarray], dict[str, Any]]):
             if secrecy is not None
             else [0.0, 0.0]
         )
+        physical = executable.physical
+        target_state_error = state.available_mean - state.target_true_state
+        target_state_nees = float(
+            target_state_error
+            @ np.linalg.pinv(state.available_covariance)
+            @ target_state_error
+        )
+        target_sinrs = (
+            [secrecy.target_near_sinr, secrecy.target_far_sinr]
+            if secrecy is not None
+            else [0.0, 0.0]
+        )
+        target_rates = (
+            [secrecy.target_near_rate_bps, secrecy.target_far_rate_bps]
+            if secrecy is not None
+            else [0.0, 0.0]
+        )
+        communication_energy = (
+            physical.communication_power_w * config.system.slot_duration_s
+        )
+        sensing_energy = physical.sensing_power_w * config.system.slot_duration_s
         return {
             "slot": state.slot,
             "stage_cost": stage_cost.total,
@@ -646,19 +689,41 @@ class HapsIsacEnv(gym.Env[dict[str, np.ndarray], dict[str, Any]]):
             "normalized_energy_cost": stage_cost.normalized_energy,
             "sum_aoi": float(np.sum(state.aoi)),
             "mean_aoi": float(np.mean(state.aoi)),
+            "max_aoi": float(np.max(state.aoi)),
+            "aoi": state.aoi.copy(),
             "mean_aoli": float(np.mean(state.aoli)),
+            "min_aoli": float(np.min(state.aoli)),
+            "aoli": state.aoli.copy(),
             "aosi": state.aosi,
             "delivery": delivered.copy(),
+            "rates_bps": state.last_rates_bps.copy(),
             "interception": intercepted.copy(),
             "secrecy_outage": secrecy_outage.copy(),
+            "secrecy_rates_bps": np.asarray(secrecy_rates, dtype=np.float64),
             "mean_secrecy_rate_bps": float(np.mean(secrecy_rates)),
+            "target_decoding_sinr": np.asarray(target_sinrs, dtype=np.float64),
+            "target_decoding_rates_bps": np.asarray(target_rates, dtype=np.float64),
             "tracking_mse": float(np.dot(target_error, target_error)),
+            "tracking_state_nees": target_state_nees,
             "tracking_cov_trace": covariance_trace,
-            "communication_energy_j": stage_cost.energy_j,
+            "total_energy_j": stage_cost.energy_j,
+            "communication_energy_j": communication_energy,
+            "sensing_energy_j": sensing_energy,
+            "computation_energy_j": compute_energy,
             "propulsion_energy_j": 0.0,
+            "total_power_w": (
+                physical.communication_power_w + physical.sensing_power_w
+            ),
+            "communication_power_w": physical.communication_power_w,
+            "sensing_power_w": physical.sensing_power_w,
+            "cpu_frequency_hz": physical.cpu_frequency_hz,
             "sic_margin": state.last_sic_margin.copy(),
             "sensing_sinr": sensing.sinr,
             "sensing_detected": sensing.detected,
+            "sensing_measurement_covariance": sensing.measurement_covariance.copy(),
+            "sensing_nis": sensing_nis,
+            "virtual_queues": state.virtual_queues.copy(),
+            "constraint_increments": increments.copy(),
             "accepted_sensing_timestamp": (
                 accepted_job.timestamp if accepted_job is not None else None
             ),
@@ -666,13 +731,9 @@ class HapsIsacEnv(gym.Env[dict[str, np.ndarray], dict[str, Any]]):
             "reliability_violation": float(
                 np.mean(np.maximum(increments[layout.reliability], 0.0))
             ),
-            "secrecy_violation": float(
-                np.mean(np.maximum(increments[layout.secrecy], 0.0))
-            ),
+            "secrecy_violation": float(np.mean(np.maximum(increments[layout.secrecy], 0.0))),
             "sensing_violation": float(max(increments[layout.sensing], 0.0)),
-            "uncertainty_violation": float(
-                max(increments[layout.uncertainty], 0.0)
-            ),
+            "uncertainty_violation": float(max(increments[layout.uncertainty], 0.0)),
             "power_violation": 0.0,
             "mobility_violation": 0.0,
             "repair_distance": executable.log.distance,
@@ -689,6 +750,20 @@ class HapsIsacEnv(gym.Env[dict[str, np.ndarray], dict[str, Any]]):
         cloned._state = self.state.clone()
         return cloned
 
+    def fork_from_state(
+        self,
+        state: SimulatorState,
+        rollout_seed: int,
+    ) -> HapsIsacEnv:
+        """Create an isolated environment with fresh common-random-number streams."""
+
+        if rollout_seed < 0:
+            raise ValueError("rollout_seed must be non-negative")
+        forked = HapsIsacEnv(self.config)
+        forked._streams = RandomStreams.from_seed(rollout_seed)
+        forked._state = state.clone()
+        return forked
+
     def evaluate_candidate(
         self,
         state: SimulatorState,
@@ -697,7 +772,5 @@ class HapsIsacEnv(gym.Env[dict[str, np.ndarray], dict[str, Any]]):
     ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
         """Evaluate one action without mutating this environment."""
 
-        candidate_env = HapsIsacEnv(self.config)
-        candidate_env._streams = RandomStreams.from_seed(rollout_seed)
-        candidate_env._state = state.clone()
+        candidate_env = self.fork_from_state(state, rollout_seed)
         return candidate_env.step(high_level_action)

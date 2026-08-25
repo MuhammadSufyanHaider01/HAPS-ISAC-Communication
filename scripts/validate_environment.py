@@ -59,7 +59,7 @@ def run_policy(
         totals["mean_aoli"] += float(info["mean_aoli"])
         totals["aosi"] += float(info["aosi"])
         totals["tracking_cov_trace"] += float(info["tracking_cov_trace"])
-        totals["energy_j"] += float(info["communication_energy_j"])
+        totals["energy_j"] += float(info["total_energy_j"])
         totals["repair_distance"] += float(info["repair_distance"])
         totals["fallbacks"] += int(info["fallback_used"])
         totals["hard_failures"] += int(not info["hard_feasible"])

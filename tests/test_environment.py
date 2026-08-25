@@ -26,6 +26,13 @@ def test_reset_and_step_match_declared_spaces() -> None:
     assert not terminated
     assert not truncated
     assert info["hard_feasible"]
+    assert info["total_energy_j"] >= info["communication_energy_j"]
+    assert info["total_energy_j"] >= info["sensing_energy_j"]
+    assert info["tracking_state_nees"] >= 0.0
+    assert info["sensing_nis"] is not None
+    assert np.asarray(info["constraint_increments"]).shape == (
+        env.config.num_virtual_queues,
+    )
 
 
 def test_delayed_echo_cannot_update_same_or_next_slot_when_delay_is_two() -> None:

@@ -6,7 +6,9 @@ Simulator-verified reasoning distillation and constrained reinforcement learning
 
 The validated Version 1 research environment is implemented. It includes fixed near/far NOMA pairs, causal communication and target sensing, target/eavesdropper reception, AoI/AoLI/AoSI, EKF tracking, CPU-delayed estimate availability, virtual queues, physical action completion, deterministic repair/fallback, reproducible state cloning, random and greedy baselines, and a reduced-grid one-step oracle.
 
-Version 2 components—RIS, AAV jamming and mobility, residual self-interference, imperfect CSI/SIC, and stochastic blockage—remain disabled behind the configuration contract. Teacher integration, distillation, and constrained PPO have not started.
+The offline teacher-generation phase is also implemented: Qwen/Gemma-compatible adapters, causal versioned prompts, strict response parsing, content-addressed caching, common-random rollout verification, CVaR-aware candidate selection, plotting-ready linked logs, dataset auditing, a fair frozen-state teacher tournament, and Slurm/vLLM templates. The complete path passes a deterministic mock-teacher smoke test; a production Qwen/Gemma dataset has not yet been generated.
+
+Version 2 components—RIS, AAV jamming and mobility, residual self-interference, imperfect CSI/SIC, and stochastic blockage—remain disabled behind the configuration contract. Student distillation, active correction, and constrained PPO have not started.
 
 ## Design documents
 
@@ -58,3 +60,26 @@ Run all quality gates:
 ```
 
 The validation command checks deterministic replay, candidate-evaluation isolation, observation/action invariants, random and urgency-greedy stress rollouts, hard feasibility, repair/fallback rates, and a common-seed one-step grid oracle.
+
+## Teacher dataset workflow
+
+Validate the complete pipeline locally without contacting a model:
+
+~~~bash
+.venv/bin/python scripts/generate_demonstrations.py \
+  --provider mock --states 3 --candidates 4 --rollouts 2 --horizon 3 \
+  --shortlist 2 --no-parquet --run-id smoke-v1 \
+  --output /tmp/haps-teacher-smoke
+.venv/bin/python scripts/audit_demonstrations.py /tmp/haps-teacher-smoke
+~~~
+
+Compare live teachers on one frozen state bank by repeating the four-value teacher option:
+
+~~~bash
+.venv/bin/python scripts/benchmark_teachers.py \
+  --teacher qwen qwen Qwen/Qwen3.5-27B http://qwen-host:8000/v1 \
+  --teacher gemma gemma GEMMA_MODEL_ID http://gemma-host:8000/v1 \
+  --states 2000 --output results/teacher-tournament
+~~~
+
+See [scripts/slurm/README.md](scripts/slurm/README.md) for non-launching ARC Slurm templates. Always audit a small pilot before requesting the full demonstration budget.

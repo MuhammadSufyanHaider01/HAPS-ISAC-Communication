@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from haps_isac.tracking.ekf import predict, update
+from haps_isac.tracking.ekf import normalized_innovation_squared, predict, update
 from haps_isac.tracking.measurement_model import (
     measurement_function,
     measurement_jacobian,
@@ -35,13 +35,22 @@ def test_prediction_increases_uncertainty_and_update_is_psd() -> None:
     assert np.trace(predicted_covariance) > np.trace(covariance)
     haps = np.asarray([0.0, 0.0, 20_000.0])
     measurement = measurement_function(predicted_mean, haps)
+    measurement_covariance = np.diag([1.0, 1e-6, 0.1])
+    nis = normalized_innovation_squared(
+        predicted_mean,
+        predicted_covariance,
+        measurement,
+        measurement_covariance,
+        haps,
+    )
     posterior_mean, posterior_covariance = update(
         predicted_mean,
         predicted_covariance,
         measurement,
-        np.diag([1.0, 1e-6, 0.1]),
+        measurement_covariance,
         haps,
     )
+    assert nis == 0.0
     assert np.all(np.linalg.eigvalsh(posterior_covariance) >= 0.0)
     assert np.trace(posterior_covariance) < np.trace(predicted_covariance)
     np.testing.assert_allclose(posterior_mean, predicted_mean)

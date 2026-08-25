@@ -1,10 +1,38 @@
 schema_version: 1
-provider: null
-model_id: null
+provider: qwen
+model_id: Qwen/Qwen3.5-27B
+model_revision: main
+base_url: http://127.0.0.1:8000/v1
+api_key_env: HAPS_TEACHER_API_KEY
 prompt_version: "1.0"
-num_candidates: 4
-rollout_horizon_slots: 20
-monte_carlo_rollouts: 16
-feedback_rounds: 2
-response_format: json
+num_candidates: 8
+request_timeout_s: 180.0
+max_retries: 3
 cache_enabled: true
+cache_directory: .cache/teacher_queries
+
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 20
+  max_tokens: 2048
+  presence_penalty: 1.5
+
+verification:
+  rollout_horizon_slots: 32
+  monte_carlo_rollouts: 8
+  shortlist_size: 3
+  discount_factor: 0.995
+  cvar_alpha: 0.90
+  cvar_weight: 0.25
+  constraint_weight: 2.0
+  repair_weight: 0.25
+  fallback_weight: 2.0
+  quality_temperature: 0.10
+
+logging:
+  flush_every: 32
+  retain_selected_trajectories: true
+  retain_failure_trajectories: true
+  trajectory_audit_fraction: 0.03
+  export_parquet: true
