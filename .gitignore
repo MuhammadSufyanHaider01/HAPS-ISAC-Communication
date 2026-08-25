@@ -1,0 +1,38 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments and local configuration
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+build/
+dist/
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+
+# Generated research artifacts
+datasets/*
+!datasets/.gitkeep
+checkpoints/*
+!checkpoints/.gitkeep
+results/*
+!results/.gitkeep
+
+# Experiment trackers
+wandb/
+mlruns/
+runs/

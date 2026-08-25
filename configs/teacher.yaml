@@ -1,0 +1,10 @@
+schema_version: 1
+provider: null
+model_id: null
+prompt_version: "1.0"
+num_candidates: 4
+rollout_horizon_slots: 20
+monte_carlo_rollouts: 16
+feedback_rounds: 2
+response_format: json
+cache_enabled: true

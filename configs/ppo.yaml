@@ -1,0 +1,16 @@
+schema_version: 1
+num_parallel_envs: 32
+rollout_steps_per_env: 256
+gamma: 0.995
+gae_lambda: 0.95
+clip_epsilon: 0.20
+policy_learning_rate: 3.0e-4
+critic_learning_rate: 3.0e-4
+dual_learning_rate: 1.0e-3
+update_epochs: 10
+minibatch_size: 1024
+entropy_coefficient: 0.01
+value_coefficient: 0.5
+max_gradient_norm: 0.5
+target_kl: 0.02
+total_environment_steps: 5000000

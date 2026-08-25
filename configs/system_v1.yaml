@@ -1,0 +1,31 @@
+schema_version: 1
+experiment_name: system_v1
+master_seed: 20260824
+
+features:
+  noma: true
+  sensing: true
+  target_tracking: true
+  aerial_ris: false
+  aav_jamming: false
+  residual_self_interference: false
+  imperfect_csi: false
+  imperfect_sic: false
+  stochastic_blockage: false
+
+system:
+  num_noma_pairs: 4
+  slot_duration_s: 0.1
+  episode_slots: 500
+  bandwidth_hz: 2.0e7
+  carrier_frequency_hz: 2.8e10
+
+haps:
+  altitude_m: 20000.0
+  num_tx_antennas: 16
+  num_rx_antennas: 8
+  max_power_w: 40.0
+
+episode:
+  warmup_slots: 50
+  evaluation_slots: 500

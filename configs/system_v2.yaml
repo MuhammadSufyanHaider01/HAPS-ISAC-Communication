@@ -1,0 +1,22 @@
+schema_version: 1
+experiment_name: system_v2
+master_seed: 20260824
+
+features:
+  noma: true
+  sensing: true
+  target_tracking: true
+  aerial_ris: true
+  aav_jamming: true
+  residual_self_interference: true
+  imperfect_csi: true
+  imperfect_sic: true
+  stochastic_blockage: true
+
+ris:
+  num_elements: 64
+  codebook_size: 32
+
+aav:
+  max_speed_mps: 30.0
+  max_jamming_power_w: 10.0

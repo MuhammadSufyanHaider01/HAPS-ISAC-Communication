@@ -1,0 +1,6 @@
+schema_version: 1
+num_independent_seeds: 10
+confidence_level: 0.95
+paired_scenario_seeds: true
+report_cvar: true
+save_seed_level_results: true

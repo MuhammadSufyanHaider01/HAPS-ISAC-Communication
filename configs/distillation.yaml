@@ -1,0 +1,9 @@
+schema_version: 1
+optimizer: adamw
+learning_rate: 3.0e-4
+weight_decay: 1.0e-4
+batch_size: 512
+max_epochs: 200
+gradient_clip_norm: 1.0
+early_stopping_patience: 20
+categorical_label_smoothing: 0.02

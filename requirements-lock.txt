@@ -1,0 +1,5 @@
+# Structural placeholder.
+#
+# Phase 0 will generate this file from pyproject.toml in a clean Python 3.11
+# environment. It must contain a reproducible, fully resolved dependency set
+# before simulator implementation is considered portable.
