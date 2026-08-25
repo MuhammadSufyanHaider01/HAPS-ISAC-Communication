@@ -9,6 +9,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
+from haps_isac.teachers.qwen_teacher import qwen_chat_template_kwargs
+
 
 def _json_log(event: str, **values: Any) -> None:
     payload = {
@@ -96,6 +98,7 @@ class TransformersQwenEngine:
         top_k = int(body.get("top_k", 0))
         max_tokens = int(body.get("max_tokens", 2048))
         presence_penalty = float(body.get("presence_penalty", 0.0))
+        chat_template_kwargs = qwen_chat_template_kwargs(body)
         if max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
 
@@ -108,7 +111,7 @@ class TransformersQwenEngine:
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-            enable_thinking=True,
+            **chat_template_kwargs,
         ).to("cuda")
         prompt_tokens = int(inputs["input_ids"].shape[-1])
         generation: dict[str, Any] = {
@@ -151,6 +154,7 @@ class TransformersQwenEngine:
             tokens_per_second=(completion_tokens / latency_s if latency_s > 0.0 else 0.0),
             peak_memory_allocated_mib=torch.cuda.max_memory_allocated() / 2**20,
             peak_memory_reserved_mib=torch.cuda.max_memory_reserved() / 2**20,
+            enable_thinking=chat_template_kwargs.get("enable_thinking", True),
         )
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",

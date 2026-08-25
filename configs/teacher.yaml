@@ -6,7 +6,7 @@ base_url: http://127.0.0.1:8000/v1
 api_key_env: HAPS_TEACHER_API_KEY
 prompt_version: "1.0"
 num_candidates: 8
-request_timeout_s: 180.0
+request_timeout_s: 600.0
 max_retries: 3
 cache_enabled: true
 cache_directory: .cache/teacher_queries
@@ -15,7 +15,7 @@ sampling:
   temperature: 1.0
   top_p: 0.95
   top_k: 20
-  max_tokens: 2048
+  max_tokens: 4096
   presence_penalty: 1.5
 
 verification:

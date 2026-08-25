@@ -17,7 +17,7 @@ from haps_isac.teachers.base_teacher import MockTeacher, TeacherRequest, load_te
 from haps_isac.teachers.benchmark import run_tournament
 from haps_isac.teachers.prompt_builder import build_teacher_prompt
 from haps_isac.teachers.query_cache import QueryCache, cache_key_for
-from haps_isac.teachers.qwen_teacher import QwenTeacher
+from haps_isac.teachers.qwen_teacher import QwenTeacher, qwen_chat_template_kwargs
 from haps_isac.teachers.response_parser import (
     TeacherResponseError,
     parse_teacher_response,
@@ -100,6 +100,7 @@ def test_teacher_request_id_is_forwarded_for_server_telemetry() -> None:
     body = QwenTeacher(config)._request_body(request)
     assert body["user"] == request.request_id
     assert body["seed"] == request.seed
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 def test_query_cache_is_content_addressed(tmp_path: pytest.TempPathFactory) -> None:
@@ -246,3 +247,27 @@ def test_tournament_uses_a_common_frozen_state_bank() -> None:
     beta_ids = [record.state_id for record in result.records if record.teacher_label == "beta"]
     assert alpha_ids == beta_ids
     assert all(summary.schema_valid_rate == 1.0 for summary in result.summaries)
+
+
+def test_transformers_server_validates_thinking_override() -> None:
+    assert qwen_chat_template_kwargs({}) == {"enable_thinking": True}
+    assert qwen_chat_template_kwargs(
+        {"chat_template_kwargs": {"enable_thinking": False}}
+    ) == {"enable_thinking": False}
+    with pytest.raises(ValueError, match="enable_thinking must be boolean"):
+        qwen_chat_template_kwargs({"chat_template_kwargs": {"enable_thinking": "false"}})
+
+
+def test_audit_reports_missing_tables_without_crashing(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    output = tmp_path / "incomplete-dataset"  # type: ignore[operator]
+    output.mkdir()
+    (output / "manifest.json").write_text(
+        json.dumps({"num_candidates": 8}),
+        encoding="utf-8",
+    )
+    audit = audit_dataset(str(output))
+    assert not audit.passed
+    assert "missing canonical table: candidates.jsonl" in audit.errors
+    assert audit.counts["candidates"] == 0

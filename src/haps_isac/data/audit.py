@@ -33,19 +33,24 @@ def _quantile(records: list[dict[str, Any]], key: str, probability: float) -> fl
 
 def audit_dataset(directory: str) -> DatasetAudit:
     loader = DatasetLoader(directory)
-    tables = {
-        name: list(loader.iter_table(name))
-        for name in (
-            "states",
-            "teacher_requests",
-            "candidates",
-            "rollouts",
-            "selections",
-            "demonstrations",
-        )
-    }
     errors: list[str] = []
     warnings: list[str] = []
+    tables: dict[str, list[dict[str, Any]]] = {}
+    for name in (
+        "states",
+        "teacher_requests",
+        "candidates",
+        "rollouts",
+        "selections",
+        "demonstrations",
+    ):
+        path = loader.directory / f"{name}.jsonl"
+        if path.exists():
+            tables[name] = list(loader.iter_table(name))
+        else:
+            tables[name] = []
+            errors.append(f"missing canonical table: {name}.jsonl")
+
     states = tables["states"]
     requests = tables["teacher_requests"]
     candidates = tables["candidates"]
