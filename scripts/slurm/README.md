@@ -30,8 +30,11 @@ HAPS_TEACHER_BACKEND=transformers \
 HAPS_PYTHON_ENVIRONMENT=.venv-gpu \
 HAPS_DATASET_STATES=2 \
 HAPS_RUN_ID=qwen-smoke-001 \
-  sbatch scripts/slurm/generate_teacher_dataset.sbatch
+  scripts/slurm/submit_teacher_dataset.sh
 ~~~
+
+The wrapper records the commit and dirty state on the login node so queued jobs retain
+reproducible source metadata even when Git is unavailable on compute nodes.
 
 Scale only after the smoke dataset passes its audit. Runtime overrides include
 `HAPS_TEACHER_MODEL`, `HAPS_TEACHER_REVISION`, `HAPS_TEACHER_BACKEND`,
@@ -45,7 +48,8 @@ Each generation job retains:
 - `teacher_server_metrics.jsonl` for request latency, token throughput, failures, and peak memory;
 - `teacher_server.stderr.log` or `vllm.log` for inference diagnostics;
 - timestamped `gpu_metrics.csv` utilization, memory, power, and temperature samples;
-- `audit.json` with quality gates and aggregate metrics; and
+- `audit.json` with quality gates and aggregate metrics;
+- `teacher_quality_report.json` with repair, confidence, difficulty, and baseline diagnostics; and
 - the Slurm stdout log under `results/`.
 
 All canonical table records include UTC timestamps. Smoke jobs flush after every state by default;

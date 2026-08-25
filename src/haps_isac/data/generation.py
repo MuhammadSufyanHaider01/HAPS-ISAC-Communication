@@ -74,6 +74,16 @@ def _stable_seed(master_seed: int, label: str) -> int:
 
 
 def _git_metadata() -> tuple[str, bool]:
+    environment_commit = os.environ.get("HAPS_GIT_COMMIT", "").strip() or None
+    raw_environment_dirty = os.environ.get("HAPS_GIT_DIRTY", "").strip().lower()
+    environment_dirty: bool | None = None
+    if raw_environment_dirty in {"1", "true", "yes"}:
+        environment_dirty = True
+    elif raw_environment_dirty in {"0", "false", "no"}:
+        environment_dirty = False
+    if environment_commit is not None and environment_dirty is not None:
+        return environment_commit, environment_dirty
+
     try:
         commit = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -91,7 +101,9 @@ def _git_metadata() -> tuple[str, bool]:
         )
         return commit, dirty
     except (OSError, subprocess.CalledProcessError):
-        return "unknown", True
+        return environment_commit or "unknown", (
+            environment_dirty if environment_dirty is not None else True
+        )
 
 
 def _nvidia_metadata() -> dict[str, Any]:

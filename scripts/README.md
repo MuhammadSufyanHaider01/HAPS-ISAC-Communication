@@ -5,6 +5,7 @@ Implemented and tested:
 - `validate_environment.py`: Version 1 simulator and baseline stress validation.
 - `generate_demonstrations.py`: cached teacher querying, verification, selection, and linked logs.
 - `audit_demonstrations.py`: dataset integrity and teacher-quality gate.
+- `report_teacher_quality.py`: repair, confidence, state-difficulty, and baseline diagnostics.
 - `benchmark_teachers.py`: frozen-state, common-random-number teacher tournament.
 - `slurm/`: non-launching vLLM and combined dataset-generation job templates.
 

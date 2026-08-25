@@ -8,9 +8,11 @@ import numpy as np
 import pytest
 
 from haps_isac.config import load_config
+from haps_isac.data import generation as generation_module
 from haps_isac.data.audit import audit_dataset
 from haps_isac.data.dataset_loader import DatasetLoader
 from haps_isac.data.generation import generate_demonstrations
+from haps_isac.data.quality_report import build_teacher_quality_report
 from haps_isac.data.split_manager import DEFAULT_SPLIT_FRACTIONS
 from haps_isac.envs.haps_isac_env import HapsIsacEnv
 from haps_isac.teachers.base_teacher import MockTeacher, TeacherRequest, load_teacher_config
@@ -59,6 +61,12 @@ def test_default_dataset_split_matches_plan() -> None:
     assert (fractions.train, fractions.validation, fractions.test) == (0.7, 0.15, 0.15)
 
 
+def test_git_metadata_prefers_submission_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAPS_GIT_COMMIT", "a" * 40)
+    monkeypatch.setenv("HAPS_GIT_DIRTY", "0")
+    assert generation_module._git_metadata() == ("a" * 40, False)
+
+
 def test_prompt_is_deterministic_and_causal() -> None:
     config = load_config("configs/system_v1.yaml")
     env = HapsIsacEnv(config)
@@ -68,6 +76,8 @@ def test_prompt_is_deterministic_and_causal() -> None:
     assert first == second
     assert "target_true_state" not in first.prompt
     assert "haps_ue_true" not in first.prompt
+    assert "every candidate MUST set the exact values ris_code=0" in first.prompt
+    assert "sensing_power_w equals eta_haps*(1-eta_communication)" in first.prompt
     assert set(first.causal_payload) == {
         "pair_tokens",
         "pair_mask",
@@ -230,6 +240,11 @@ def test_mock_generation_writes_loadable_linked_tables(tmp_path: pytest.TempPath
     audit = audit_dataset(str(output))
     assert audit.passed
     assert audit.metrics["candidate_post_repair_hard_feasible_rate"] == 1.0
+    quality = build_teacher_quality_report(output)
+    assert quality["counts"]["states"] == 2
+    assert quality["baseline_comparison"]["compared_states"] == 2
+    assert "eta_communication" in quality["action_field_changes"]
+    assert quality["scale_up_gates"]["request_schema_valid_rate"]["passed"]
 
 
 def test_tournament_uses_a_common_frozen_state_bank() -> None:

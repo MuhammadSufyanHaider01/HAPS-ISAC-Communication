@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any
+from pathlib import Path
+from typing import Any, TextIO
 
 from haps_isac.teachers.qwen_teacher import (
     qwen_chat_template_kwargs,
     qwen_device_map,
 )
+
+_METRICS_STREAM: TextIO = sys.stdout
 
 
 def _json_log(event: str, **values: Any) -> None:
@@ -21,7 +25,16 @@ def _json_log(event: str, **values: Any) -> None:
         "event": event,
         **values,
     }
-    print(json.dumps(payload, sort_keys=True, default=str), flush=True)
+    print(json.dumps(payload, sort_keys=True, default=str), file=_METRICS_STREAM, flush=True)
+
+
+def _set_metrics_file(path: str | None) -> None:
+    global _METRICS_STREAM
+    if path is None:
+        return
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _METRICS_STREAM = output.open("a", encoding="utf-8")
 
 
 def _split_reasoning(text: str) -> tuple[str, str | None]:
@@ -269,11 +282,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--revision", required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--metrics-file")
     return parser
 
 
 def main() -> None:
     arguments = build_parser().parse_args()
+    _set_metrics_file(arguments.metrics_file)
     engine = TransformersQwenEngine(arguments.model, arguments.revision)
     TeacherRequestHandler.engine = engine
     server = HTTPServer((arguments.host, arguments.port), TeacherRequestHandler)
@@ -289,6 +304,8 @@ def main() -> None:
     finally:
         server.server_close()
         _json_log("server_stopped")
+        if _METRICS_STREAM is not sys.stdout:
+            _METRICS_STREAM.close()
 
 
 if __name__ == "__main__":

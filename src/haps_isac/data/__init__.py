@@ -12,6 +12,7 @@ from haps_isac.data.demonstration_schema import (
     StateLogRecord,
     TeacherRequestLog,
 )
+from haps_isac.data.quality_report import build_teacher_quality_report
 from haps_isac.data.split_manager import SplitFractions, assign_split
 
 __all__ = [
@@ -28,5 +29,6 @@ __all__ = [
     "StateLogRecord",
     "TeacherRequestLog",
     "assign_split",
+    "build_teacher_quality_report",
     "audit_dataset",
 ]

@@ -47,8 +47,8 @@ if [[ "${teacher_backend}" == "transformers" ]]; then
     --revision "${teacher_revision}" \
     --host 127.0.0.1 \
     --port "${teacher_port}" \
-    >"${output_directory}/teacher_server_metrics.jsonl" \
-    2>"${server_log}" &
+    --metrics-file "${output_directory}/teacher_server_metrics.jsonl" \
+    >"${server_log}" 2>&1 &
 elif [[ "${teacher_backend}" == "vllm" ]]; then
   server_log="${output_directory}/vllm.log"
   server_args=(
@@ -115,6 +115,10 @@ fi
   --run-id "${run_id}" \
   --output "${output_directory}" \
   --flush-every "${flush_every}"
+
+"${python_environment}/bin/python" scripts/report_teacher_quality.py "${output_directory}" \
+  --output "${output_directory}/teacher_quality_report.json" \
+  >/dev/null
 
 "${python_environment}/bin/python" scripts/audit_demonstrations.py "${output_directory}" \
   | tee "${output_directory}/audit.json"
