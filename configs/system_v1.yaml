@@ -21,10 +21,81 @@ system:
   carrier_frequency_hz: 2.8e10
 
 haps:
-  altitude_m: 20000.0
+  position_m: [0.0, 0.0, 20000.0]
   num_tx_antennas: 16
   num_rx_antennas: 8
   max_power_w: 40.0
+  min_cpu_frequency_hz: 1.0e9
+  max_cpu_frequency_hz: 3.0e9
+  sensing_cycles: 2.0e8
+  effective_capacitance: 1.0e-28
+
+channels:
+  rician_k_factor: 10.0
+  additional_loss_db: 1.0
+  atmospheric_loss_db: 0.5
+  thermal_noise_density_dbm_hz: -174.0
+  receiver_noise_figure_db: 7.0
+  sensing_cancellation_fraction: 0.02
+  target_sic_residual_fraction: 0.0
+  legitimate_sic_residual_fraction: 0.0
+  csi_error_variance: 0.0
+
+topology:
+  near_radius_range_m: [2000.0, 9000.0]
+  far_radius_range_m: [12000.0, 28000.0]
+  minimum_pair_separation_m: 500.0
+
+traffic:
+  packet_bits_near: 5.0e5
+  packet_bits_far: 5.0e5
+
+sensing:
+  echo_gain: 5.0e-14
+  sinr_threshold: 3.0
+  sinr_floor: 0.1
+  range_variance_scale: 400.0
+  angle_variance_scale: 0.0012184697
+  doppler_variance_scale: 4.0
+  acceptance_covariance_trace: 2.0e6
+  residual_self_interference_fraction: 0.0
+
+target:
+  initial_state: [15000.0, 5000.0, 18.0, 6.0]
+  initial_std: [500.0, 500.0, 10.0, 10.0]
+  acceleration_std_mps2: 1.0
+  scenario_radius_m: 50000.0
+  min_target_radius_m: 8000.0
+  max_target_radius_m: 30000.0
+
+freshness:
+  aoi_cap_slots: 200
+  aoli_cap_slots: 200
+  aosi_cap_slots: 200
+  initial_aoi_slots: 1
+  initial_aoli_slots: 20
+  initial_aosi_slots: 1
+
+constraints:
+  minimum_aoli_slots: 10.0
+  minimum_delivery_rate: 0.05
+  secrecy_outage_probability: 0.10
+  sensing_outage_probability: 0.10
+  secrecy_rate_target_bps: 1.0e6
+  sensing_sinr_threshold: 3.0
+  sic_sinr_threshold: 0.2
+  maximum_covariance_trace: 2.0e6
+  minimum_sensing_power_w: 2.0
+  queue_reference: 25.0
+  queue_clip: 250.0
+
+objective:
+  weight_aoi: 0.35
+  weight_aosi: 0.25
+  weight_uncertainty: 0.20
+  weight_energy: 0.20
+  covariance_reference: 2.0e6
+  energy_reference_j: 5.0
 
 episode:
   warmup_slots: 50
