@@ -21,6 +21,13 @@ def qwen_chat_template_kwargs(body: dict[str, Any]) -> dict[str, bool]:
     return {"enable_thinking": enable_thinking}
 
 
+def qwen_device_map(cuda_device_count: int) -> str | None:
+    """Select weight placement without sharding a model that fits one GPU."""
+
+    if cuda_device_count <= 0:
+        raise ValueError("cuda_device_count must be positive")
+    return "balanced_low_0" if cuda_device_count > 1 else None
+
 
 class QwenTeacher(OpenAICompatibleTeacher):
     """Request concise structured Qwen output for offline action proposals."""

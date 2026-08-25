@@ -17,7 +17,11 @@ from haps_isac.teachers.base_teacher import MockTeacher, TeacherRequest, load_te
 from haps_isac.teachers.benchmark import run_tournament
 from haps_isac.teachers.prompt_builder import build_teacher_prompt
 from haps_isac.teachers.query_cache import QueryCache, cache_key_for
-from haps_isac.teachers.qwen_teacher import QwenTeacher, qwen_chat_template_kwargs
+from haps_isac.teachers.qwen_teacher import (
+    QwenTeacher,
+    qwen_chat_template_kwargs,
+    qwen_device_map,
+)
 from haps_isac.teachers.response_parser import (
     TeacherResponseError,
     parse_teacher_response,
@@ -101,6 +105,13 @@ def test_teacher_request_id_is_forwarded_for_server_telemetry() -> None:
     assert body["user"] == request.request_id
     assert body["seed"] == request.seed
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_qwen_device_map_only_shards_across_multiple_gpus() -> None:
+    assert qwen_device_map(1) is None
+    assert qwen_device_map(2) == "balanced_low_0"
+    with pytest.raises(ValueError, match="cuda_device_count must be positive"):
+        qwen_device_map(0)
 
 
 def test_query_cache_is_content_addressed(tmp_path: pytest.TempPathFactory) -> None:

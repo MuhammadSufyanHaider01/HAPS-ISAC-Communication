@@ -9,7 +9,10 @@ import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
-from haps_isac.teachers.qwen_teacher import qwen_chat_template_kwargs
+from haps_isac.teachers.qwen_teacher import (
+    qwen_chat_template_kwargs,
+    qwen_device_map,
+)
 
 
 def _json_log(event: str, **values: Any) -> None:
@@ -30,7 +33,7 @@ def _split_reasoning(text: str) -> tuple[str, str | None]:
 
 
 class TransformersQwenEngine:
-    """Single-GPU serial Qwen inference with plotting-ready request telemetry."""
+    """Serial Qwen inference with automatic multi-GPU weight sharding."""
 
     def __init__(self, model_id: str, revision: str) -> None:
         import torch
@@ -38,6 +41,9 @@ class TransformersQwenEngine:
 
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is required by the Transformers teacher server")
+        self.device_count = torch.cuda.device_count()
+        self.input_device = torch.device("cuda:0")
+        device_map = qwen_device_map(self.device_count)
         self.torch = torch
         self.model_id = model_id
         self.revision = revision
@@ -48,7 +54,9 @@ class TransformersQwenEngine:
             revision=revision,
             torch_version=torch.__version__,
             torch_cuda=torch.version.cuda,
-            device=torch.cuda.get_device_name(0),
+            cuda_device_count=self.device_count,
+            devices=[torch.cuda.get_device_name(index) for index in range(self.device_count)],
+            device_map_strategy=device_map or "single_device",
         )
         started = time.perf_counter()
         self.processor = AutoProcessor.from_pretrained(model_id, revision=revision)
@@ -58,16 +66,38 @@ class TransformersQwenEngine:
             dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             attn_implementation="sdpa",
+            device_map=device_map,
         )
-        self.model = model.to("cuda").eval()
+        self.model = model.eval()
+        if device_map is None:
+            self.model = self.model.to(self.input_device)
+        self.input_device = self.model.get_input_embeddings().weight.device
+        allocated_by_device = self._cuda_memory_by_device("memory_allocated")
+        reserved_by_device = self._cuda_memory_by_device("memory_reserved")
+        raw_device_map = getattr(self.model, "hf_device_map", None)
+        model_devices = (
+            sorted({str(location) for location in raw_device_map.values()})
+            if isinstance(raw_device_map, dict)
+            else [str(self.input_device)]
+        )
         _json_log(
             "model_load_completed",
             model_id=model_id,
             revision=revision,
             latency_s=time.perf_counter() - started,
-            memory_allocated_mib=torch.cuda.memory_allocated() / 2**20,
-            memory_reserved_mib=torch.cuda.memory_reserved() / 2**20,
+            memory_allocated_mib=sum(allocated_by_device.values()),
+            memory_reserved_mib=sum(reserved_by_device.values()),
+            memory_allocated_by_device_mib=allocated_by_device,
+            memory_reserved_by_device_mib=reserved_by_device,
+            model_devices=model_devices,
         )
+
+    def _cuda_memory_by_device(self, metric_name: str) -> dict[str, float]:
+        metric = getattr(self.torch.cuda, metric_name)
+        return {
+            f"cuda:{index}": float(metric(index)) / 2**20
+            for index in range(self.device_count)
+        }
 
     @staticmethod
     def _messages(body: dict[str, Any]) -> list[dict[str, Any]]:
@@ -104,7 +134,8 @@ class TransformersQwenEngine:
 
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-        torch.cuda.reset_peak_memory_stats()
+        for device_index in range(self.device_count):
+            torch.cuda.reset_peak_memory_stats(device_index)
         inputs = self.processor.apply_chat_template(
             messages,
             add_generation_prompt=True,
@@ -112,7 +143,7 @@ class TransformersQwenEngine:
             return_dict=True,
             return_tensors="pt",
             **chat_template_kwargs,
-        ).to("cuda")
+        ).to(self.input_device)
         prompt_tokens = int(inputs["input_ids"].shape[-1])
         generation: dict[str, Any] = {
             "max_new_tokens": max_tokens,
@@ -145,6 +176,8 @@ class TransformersQwenEngine:
         decoded = self.processor.decode(generated_ids, skip_special_tokens=True)
         content, reasoning = _split_reasoning(decoded)
         request_id = str(body.get("user") or uuid.uuid4().hex)
+        peak_allocated_by_device = self._cuda_memory_by_device("max_memory_allocated")
+        peak_reserved_by_device = self._cuda_memory_by_device("max_memory_reserved")
         _json_log(
             "generation_completed",
             request_id=request_id,
@@ -152,8 +185,10 @@ class TransformersQwenEngine:
             completion_tokens=completion_tokens,
             latency_s=latency_s,
             tokens_per_second=(completion_tokens / latency_s if latency_s > 0.0 else 0.0),
-            peak_memory_allocated_mib=torch.cuda.max_memory_allocated() / 2**20,
-            peak_memory_reserved_mib=torch.cuda.max_memory_reserved() / 2**20,
+            peak_memory_allocated_mib=sum(peak_allocated_by_device.values()),
+            peak_memory_reserved_mib=sum(peak_reserved_by_device.values()),
+            peak_memory_allocated_by_device_mib=peak_allocated_by_device,
+            peak_memory_reserved_by_device_mib=peak_reserved_by_device,
             enable_thinking=chat_template_kwargs.get("enable_thinking", True),
         )
         return {
