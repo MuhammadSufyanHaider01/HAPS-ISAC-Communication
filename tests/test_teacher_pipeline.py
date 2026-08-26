@@ -159,7 +159,7 @@ def test_teacher_request_id_is_forwarded_for_server_telemetry() -> None:
 
 def test_qwen_device_map_only_shards_across_multiple_gpus() -> None:
     assert qwen_device_map(1) is None
-    assert qwen_device_map(2) == "balanced_low_0"
+    assert qwen_device_map(2) == "balanced"
     with pytest.raises(ValueError, match="cuda_device_count must be positive"):
         qwen_device_map(0)
 

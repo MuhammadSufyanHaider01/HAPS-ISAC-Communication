@@ -26,7 +26,7 @@ def qwen_device_map(cuda_device_count: int) -> str | None:
 
     if cuda_device_count <= 0:
         raise ValueError("cuda_device_count must be positive")
-    return "balanced_low_0" if cuda_device_count > 1 else None
+    return "balanced" if cuda_device_count > 1 else None
 
 
 class QwenTeacher(OpenAICompatibleTeacher):
