@@ -88,6 +88,9 @@ def test_prompt_is_deterministic_and_causal() -> None:
         "previous_action",
     }
     assert first.sic_safe_templates
+    sensing_only = first.sensing_only_template
+    assert sensing_only["pair"] == 0
+    assert sensing_only["sensing_power_w"] >= config.constraints.minimum_sensing_power_w
     assert {int(template["pair"]) for template in first.sic_safe_templates} == {
         1,
         2,
@@ -125,6 +128,37 @@ def test_prompt_is_deterministic_and_causal() -> None:
         )
         assert evaluation.pre_repair_feasible
         assert not evaluation.fallback_used
+
+    sensing_raw = json.dumps(
+        {
+            "schema_version": 1,
+            "state_id": "sensing-template",
+            "candidates": [
+                {
+                    "pair": sensing_only["pair"],
+                    "ris_code": 0,
+                    "eta_haps": sensing_only["eta_haps"],
+                    "eta_communication": sensing_only["eta_communication"],
+                    "eta_near": sensing_only["eta_near"],
+                    "eta_jamming": 0.0,
+                    "aav_heading_rad": 0.0,
+                    "aav_speed_fraction": 0.0,
+                    "eta_cpu": 0.5,
+                    "reason_codes": [sensing_only["template_id"]],
+                    "confidence": 1.0,
+                }
+            ],
+        }
+    )
+    sensing_parsed = parse_teacher_response(sensing_raw, "sensing-template", 1, 4)
+    sensing_evaluation = evaluate_one_step(
+        env,
+        env.state,
+        sensing_parsed.candidates[0],
+        rollout_seed=23,
+    )
+    assert sensing_evaluation.pre_repair_feasible
+    assert not sensing_evaluation.fallback_used
 
 
 def test_response_parser_enforces_identity_count_and_bounds() -> None:

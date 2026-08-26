@@ -32,6 +32,7 @@ class PromptArtifact:
     prompt_hash: str
     causal_state_hash: str
     causal_payload: dict[str, Any]
+    sensing_only_template: dict[str, Any]
 
     sic_safe_templates: tuple[dict[str, Any], ...]
 
@@ -160,6 +161,23 @@ def build_sic_safe_templates(
     return tuple(templates)
 
 
+def build_sensing_only_template(config: ExperimentConfig) -> dict[str, Any]:
+    """Build the minimum-power sensing-only action template."""
+
+    minimum_fraction = config.constraints.minimum_sensing_power_w / config.haps.max_power_w
+    if minimum_fraction > 1.0:
+        raise ValueError("minimum sensing power exceeds maximum HAPS power")
+    eta_haps = _round_up(minimum_fraction)
+    return {
+        "template_id": "sensing_only_minimum_power",
+        "pair": 0,
+        "eta_haps": eta_haps,
+        "eta_communication": 0.0,
+        "eta_near": 0.0,
+        "sensing_power_w": round(eta_haps * config.haps.max_power_w, 6),
+    }
+
+
 def build_teacher_prompt(
     config: ExperimentConfig,
     observation: Observation,
@@ -174,6 +192,7 @@ def build_teacher_prompt(
     canonical_state = json.dumps(causal, sort_keys=True, separators=(",", ":"))
     state_hash = hashlib.sha256(canonical_state.encode("utf-8")).hexdigest()
     sic_templates = build_sic_safe_templates(config, state)
+    sensing_only_template = build_sensing_only_template(config)
     task = {
         "schema_version": 1,
         "prompt_version": prompt_version,
@@ -190,6 +209,7 @@ def build_teacher_prompt(
             "maximum_covariance_trace": config.constraints.maximum_covariance_trace,
         },
         "sic_safe_templates": sic_templates,
+        "sensing_only_template": sensing_only_template,
         "causal_observation": causal,
     }
     instructions = (
@@ -200,8 +220,9 @@ def build_teacher_prompt(
         "eta_cpu in [0,1], eta_near in [0,0.5], heading in [-pi,pi]. For Version 1, "
         "every candidate MUST set the exact values ris_code=0, eta_jamming=0.0, "
         "aav_heading_rad=0.0 and aav_speed_fraction=0.0; there are no exceptions. "
-        "Return exactly one sensing-only candidate with pair=0, eta_communication=0.0 "
-        "and eta_near=0.0. Every other candidate MUST be a NOMA action copied from one "
+        "Return exactly one sensing-only candidate copied from sensing_only_template: "
+        "copy its pair, eta_haps, eta_communication, and eta_near exactly and put its "
+        "template_id in reason_codes. Every other candidate MUST be a NOMA action copied from one "
         "entry in sic_safe_templates: copy that entry's pair, eta_haps, and "
         "eta_communication exactly, set eta_near no higher than maximum_eta_near, and "
         "put its template_id in reason_codes. Use distinct templates when possible and "
@@ -225,4 +246,5 @@ def build_teacher_prompt(
         causal_state_hash=state_hash,
         causal_payload=causal,
         sic_safe_templates=sic_templates,
+        sensing_only_template=sensing_only_template,
     )

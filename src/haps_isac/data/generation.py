@@ -734,7 +734,10 @@ def generate_demonstrations(
                     split=split,
                     causal_state_hash=prompt.causal_state_hash,
                     observation=prompt.causal_payload,
-                    teacher_guidance={"sic_safe_templates": prompt.sic_safe_templates},
+                    teacher_guidance={
+                        "sensing_only_template": prompt.sensing_only_template,
+                        "sic_safe_templates": prompt.sic_safe_templates,
+                    },
                     state_metrics=_state_metrics(state),
                     verifier_only=_verifier_only(state),
                 ),
