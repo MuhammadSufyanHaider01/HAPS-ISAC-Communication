@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -32,6 +33,7 @@ from haps_isac.verification.candidate_evaluator import evaluate_one_step
 from haps_isac.verification.candidate_selector import select_candidate
 from haps_isac.verification.rollout_verifier import (
     common_rollout_seeds,
+    summarize_rollouts,
     verify_candidate,
 )
 
@@ -71,13 +73,13 @@ def test_prompt_is_deterministic_and_causal() -> None:
     config = load_config("configs/system_v1.yaml")
     env = HapsIsacEnv(config)
     observation, _ = env.reset(seed=9)
-    first = build_teacher_prompt(config, observation, "state-1", "1.0", 4)
-    second = build_teacher_prompt(config, observation, "state-1", "1.0", 4)
+    first = build_teacher_prompt(config, observation, env.state, "state-1", "1.0", 4)
+    second = build_teacher_prompt(config, observation, env.state, "state-1", "1.0", 4)
     assert first == second
     assert "target_true_state" not in first.prompt
     assert "haps_ue_true" not in first.prompt
     assert "every candidate MUST set the exact values ris_code=0" in first.prompt
-    assert "sensing_power_w equals eta_haps*(1-eta_communication)" in first.prompt
+    assert "satisfy sensing_power_w=eta_haps*(1-eta_communication)" in first.prompt
     assert set(first.causal_payload) == {
         "pair_tokens",
         "pair_mask",
@@ -85,6 +87,44 @@ def test_prompt_is_deterministic_and_causal() -> None:
         "virtual_queues",
         "previous_action",
     }
+    assert first.sic_safe_templates
+    assert {int(template["pair"]) for template in first.sic_safe_templates} == {
+        1,
+        2,
+        3,
+        4,
+    }
+    for index, template in enumerate(first.sic_safe_templates):
+        raw = json.dumps(
+            {
+                "schema_version": 1,
+                "state_id": f"template-{index}",
+                "candidates": [
+                    {
+                        "pair": template["pair"],
+                        "ris_code": 0,
+                        "eta_haps": template["eta_haps"],
+                        "eta_communication": template["eta_communication"],
+                        "eta_near": template["recommended_eta_near"],
+                        "eta_jamming": 0.0,
+                        "aav_heading_rad": 0.0,
+                        "aav_speed_fraction": 0.0,
+                        "eta_cpu": 0.5,
+                        "reason_codes": [template["template_id"]],
+                        "confidence": 1.0,
+                    }
+                ],
+            }
+        )
+        parsed = parse_teacher_response(raw, f"template-{index}", 1, 4)
+        evaluation = evaluate_one_step(
+            env,
+            env.state,
+            parsed.candidates[0],
+            rollout_seed=19,
+        )
+        assert evaluation.pre_repair_feasible
+        assert not evaluation.fallback_used
 
 
 def test_response_parser_enforces_identity_count_and_bounds() -> None:
@@ -137,12 +177,16 @@ def test_common_random_rollouts_are_reproducible() -> None:
     config = load_config("configs/system_v1.yaml")
     teacher = load_teacher_config("configs/teacher.yaml")
     settings = teacher.verification.model_copy(
-        update={"monte_carlo_rollouts": 2, "rollout_horizon_slots": 3}
+        update={
+            "monte_carlo_rollouts": 2,
+            "rollout_horizon_slots": 3,
+            "uncertainty_bootstrap_samples": 100,
+        }
     )
     env = HapsIsacEnv(config)
     observation, _ = env.reset(seed=17)
     state = env.state.clone()
-    prompt = build_teacher_prompt(config, observation, "state-a", "1.0", 4)
+    prompt = build_teacher_prompt(config, observation, state, "state-a", "1.0", 4)
     mock_config = teacher.model_copy(
         update={
             "provider": "mock",
@@ -178,12 +222,48 @@ def test_common_random_rollouts_are_reproducible() -> None:
     )
     assert summaries[0].mean_cost == repeated.mean_cost
     assert env.state.slot == 0
-    selection = select_candidate(one_steps, summaries, 0.1)
+    selection = select_candidate(one_steps, summaries, settings)
     assert selection.selected_candidate_index in (0, 1)
     assert np.isclose(
         sum(item.quality_weight for item in selection.rankings),
         1.0,
     )
+    assert 0.0 <= selection.selection_probability <= 1.0
+    assert selection.margin_confidence_lower <= selection.margin_confidence_upper
+    paired_best_rollouts = tuple(
+        replace(
+            rollout,
+            candidate_index=0,
+            discounted_cost=float(index),
+            mean_constraint_violation=0.0,
+            mean_repair_distance=0.0,
+            fallback_rate=0.0,
+            hard_feasible=True,
+        )
+        for index, rollout in enumerate(summaries[0].rollouts, start=1)
+    )
+    paired_second_rollouts = tuple(
+        replace(
+            rollout,
+            candidate_index=1,
+            discounted_cost=float(index) + 0.01,
+            mean_constraint_violation=0.0,
+            mean_repair_distance=0.0,
+            fallback_rate=0.0,
+            hard_feasible=True,
+        )
+        for index, rollout in enumerate(summaries[1].rollouts, start=1)
+    )
+    paired_selection = select_candidate(
+        one_steps,
+        (
+            summarize_rollouts(0, paired_best_rollouts, settings),
+            summarize_rollouts(1, paired_second_rollouts, settings),
+        ),
+        settings,
+    )
+    assert paired_selection.margin_confidence_lower > 0.0
+    assert not paired_selection.selection_uncertain
 
 
 def test_mock_generation_writes_loadable_linked_tables(tmp_path: pytest.TempPathFactory) -> None:
@@ -201,6 +281,7 @@ def test_mock_generation_writes_loadable_linked_tables(tmp_path: pytest.TempPath
                     "monte_carlo_rollouts": 2,
                     "rollout_horizon_slots": 2,
                     "shortlist_size": 2,
+                    "uncertainty_bootstrap_samples": 100,
                 }
             ),
             "logging": teacher.logging.model_copy(update={"export_parquet": False}),
@@ -221,14 +302,14 @@ def test_mock_generation_writes_loadable_linked_tables(tmp_path: pytest.TempPath
         "states": 2,
         "teacher_requests": 2,
         "candidates": 8,
-        "rollouts": 8,
+        "rollouts": 16,
         "selections": 2,
         "demonstrations": 2,
     }
     for table_name in manifest.table_counts:
         first_line = (output / f"{table_name}.jsonl").read_text(encoding="utf-8").splitlines()[0]
         record = json.loads(first_line)
-        assert record["schema_version"] == 2
+        assert record["schema_version"] == 3
         assert record["logged_at"].endswith("+00:00")
     assert "torch" in manifest.software["packages"]
     loader = DatasetLoader(output)
@@ -244,6 +325,7 @@ def test_mock_generation_writes_loadable_linked_tables(tmp_path: pytest.TempPath
     assert quality["counts"]["states"] == 2
     assert quality["baseline_comparison"]["compared_states"] == 2
     assert "eta_communication" in quality["action_field_changes"]
+    assert quality["baseline_comparison"]["verified_compared_states"] == 2
     assert quality["scale_up_gates"]["request_schema_valid_rate"]["passed"]
 
 
@@ -255,6 +337,7 @@ def test_tournament_uses_a_common_frozen_state_bank() -> None:
             "monte_carlo_rollouts": 2,
             "rollout_horizon_slots": 2,
             "shortlist_size": 2,
+            "uncertainty_bootstrap_samples": 100,
         }
     )
     common = {
@@ -277,9 +360,9 @@ def test_tournament_uses_a_common_frozen_state_bank() -> None:
 
 def test_transformers_server_validates_thinking_override() -> None:
     assert qwen_chat_template_kwargs({}) == {"enable_thinking": True}
-    assert qwen_chat_template_kwargs(
-        {"chat_template_kwargs": {"enable_thinking": False}}
-    ) == {"enable_thinking": False}
+    assert qwen_chat_template_kwargs({"chat_template_kwargs": {"enable_thinking": False}}) == {
+        "enable_thinking": False
+    }
     with pytest.raises(ValueError, match="enable_thinking must be boolean"):
         qwen_chat_template_kwargs({"chat_template_kwargs": {"enable_thinking": "false"}})
 

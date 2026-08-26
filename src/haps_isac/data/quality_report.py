@@ -25,10 +25,19 @@ ACTION_FIELDS = (
 SCALE_UP_THRESHOLDS = {
     "request_schema_valid_rate": (">=", 0.99),
     "candidate_unique_ratio": (">=", 0.75),
+    "candidate_role_compliance_rate": (">=", 0.95),
+    "executed_candidate_unique_ratio": (">=", 0.75),
     "candidate_post_repair_hard_feasible_rate": (">=", 1.0),
     "candidate_fallback_rate": ("<=", 0.05),
     "candidate_p95_repair_distance": ("<=", 0.25),
+    "selected_fallback_rate": ("<=", 0.0),
+    "selected_p95_repair_distance": ("<=", 0.05),
+    "selection_uncertain_rate": ("<=", 0.05),
     "demonstration_acceptance_rate": (">=", 0.99),
+    "selected_vs_greedy_verified_win_rate": (">=", 0.55),
+    "selected_vs_random_verified_win_rate": (">=", 0.55),
+    "mean_greedy_minus_selected_verified_risk": (">=", 0.0),
+    "mean_random_minus_selected_verified_risk": (">=", 0.0),
 }
 
 
@@ -55,6 +64,44 @@ def _candidate_summary(records: list[dict[str, Any]]) -> dict[str, float | int]:
         "mean_repair_distance": _mean(repair_distances),
         "p95_repair_distance": _quantile(repair_distances, 0.95),
     }
+
+
+def _action_key(action: dict[str, Any]) -> tuple[int | float, ...]:
+    return tuple(round(float(action[field]), 8) for field in ACTION_FIELDS)
+
+
+def _action_diversity(candidates: list[dict[str, Any]]) -> dict[str, float | int]:
+    by_state: dict[str, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        by_state.setdefault(str(candidate["state_id"]), []).append(candidate)
+    proposed_ratios: list[float] = []
+    executed_ratios: list[float] = []
+    for records in by_state.values():
+        denominator = max(1, len(records))
+        proposed_ratios.append(
+            len({_action_key(record["proposed_action"]) for record in records}) / denominator
+        )
+        executed_ratios.append(
+            len({_action_key(record["executed_action"]) for record in records}) / denominator
+        )
+    return {
+        "states": len(by_state),
+        "mean_proposed_unique_ratio": _mean(proposed_ratios),
+        "mean_executed_unique_ratio": _mean(executed_ratios),
+        "states_below_0.75_executed_unique_ratio": sum(ratio < 0.75 for ratio in executed_ratios),
+    }
+
+
+def _candidate_role_compliance_rate(candidates: list[dict[str, Any]]) -> float:
+    by_state: dict[str, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        by_state.setdefault(str(candidate["state_id"]), []).append(candidate)
+    return _mean(
+        [
+            float(sum(int(record["proposed_action"]["pair"]) == 0 for record in records) == 1)
+            for records in by_state.values()
+        ]
+    )
 
 
 def _confidence_bucket(confidence: float) -> str:
@@ -88,25 +135,32 @@ def _baseline_comparison(
     selections: list[dict[str, Any]],
 ) -> dict[str, float | int]:
     selected_by_state = {
-        str(record["state_id"]): record
-        for record in candidates
-        if bool(record["selected"])
+        str(record["state_id"]): record for record in candidates if bool(record["selected"])
     }
     selected_costs: list[float] = []
     greedy_costs: list[float] = []
     random_costs: list[float] = []
+    selected_risks: list[float] = []
+    greedy_risks: list[float] = []
+    random_risks: list[float] = []
     for selection in selections:
         selected = selected_by_state.get(str(selection["state_id"]))
         baselines = selection.get("baseline_scores", {})
-        if (
-            selected is None
-            or "greedy_one_step_cost" not in baselines
-            or "random_one_step_cost" not in baselines
-        ):
+        if selected is None:
             continue
-        selected_costs.append(float(selected["one_step_stage_cost"]))
-        greedy_costs.append(float(baselines["greedy_one_step_cost"]))
-        random_costs.append(float(baselines["random_one_step_cost"]))
+        if "greedy_one_step_cost" in baselines and "random_one_step_cost" in baselines:
+            selected_costs.append(float(selected["one_step_stage_cost"]))
+            greedy_costs.append(float(baselines["greedy_one_step_cost"]))
+            random_costs.append(float(baselines["random_one_step_cost"]))
+        rollout_summary = selected.get("rollout_summary") or {}
+        if (
+            "risk_score" in rollout_summary
+            and "greedy_verified_risk_score" in baselines
+            and "random_verified_risk_score" in baselines
+        ):
+            selected_risks.append(float(rollout_summary["risk_score"]))
+            greedy_risks.append(float(baselines["greedy_verified_risk_score"]))
+            random_risks.append(float(baselines["random_verified_risk_score"]))
     return {
         "compared_states": len(selected_costs),
         "mean_selected_one_step_cost": _mean(selected_costs),
@@ -136,6 +190,34 @@ def _baseline_comparison(
                 for selected, baseline in zip(selected_costs, random_costs, strict=True)
             ]
         ),
+        "verified_compared_states": len(selected_risks),
+        "mean_selected_verified_risk": _mean(selected_risks),
+        "mean_greedy_verified_risk": _mean(greedy_risks),
+        "mean_random_verified_risk": _mean(random_risks),
+        "selected_vs_greedy_verified_win_rate": _mean(
+            [
+                float(selected < baseline)
+                for selected, baseline in zip(selected_risks, greedy_risks, strict=True)
+            ]
+        ),
+        "selected_vs_random_verified_win_rate": _mean(
+            [
+                float(selected < baseline)
+                for selected, baseline in zip(selected_risks, random_risks, strict=True)
+            ]
+        ),
+        "mean_greedy_minus_selected_verified_risk": _mean(
+            [
+                baseline - selected
+                for selected, baseline in zip(selected_risks, greedy_risks, strict=True)
+            ]
+        ),
+        "mean_random_minus_selected_verified_risk": _mean(
+            [
+                baseline - selected
+                for selected, baseline in zip(selected_risks, random_risks, strict=True)
+            ]
+        ),
     }
 
 
@@ -159,6 +241,7 @@ def _state_difficulty_rows(
         selection = selections_by_state.get(state_id, {})
         metrics = state["state_metrics"]
         baselines = selection.get("baseline_scores", {})
+        selected_rollout = (selected or {}).get("rollout_summary") or {}
         row = {
             "state_id": state_id,
             "scenario_id": str(state["scenario_id"]),
@@ -181,6 +264,15 @@ def _state_difficulty_rows(
             "selected_fallback_used": (
                 bool(selected["fallback_used"]) if selected is not None else None
             ),
+            "selected_verified_risk": (
+                float(selected_rollout["risk_score"]) if "risk_score" in selected_rollout else None
+            ),
+            "selection_uncertain": selection.get("selection_uncertain"),
+            "selection_probability": selection.get("selection_probability"),
+            "margin_confidence_lower": selection.get("margin_confidence_lower"),
+            "margin_confidence_upper": selection.get("margin_confidence_upper"),
+            "greedy_verified_risk": baselines.get("greedy_verified_risk_score"),
+            "random_verified_risk": baselines.get("random_verified_risk_score"),
             "greedy_one_step_cost": (
                 float(baselines["greedy_one_step_cost"])
                 if "greedy_one_step_cost" in baselines
@@ -210,23 +302,46 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
     request_schema_valid_rate = _rate(requests, "schema_valid")
     candidate_unique_ratio = _mean(
         [
-            float(record["unique_candidates"])
-            / max(1.0, float(record["candidates_returned"]))
+            float(record["unique_candidates"]) / max(1.0, float(record["candidates_returned"]))
             for record in valid_requests
         ]
     )
     candidate_summary = _candidate_summary(candidates)
+    selected_candidates = [candidate for candidate in candidates if bool(candidate["selected"])]
+    selected_summary = _candidate_summary(selected_candidates)
+    action_diversity = _action_diversity(candidates)
+    candidate_role_compliance_rate = _candidate_role_compliance_rate(candidates)
+    accepted_selections = [
+        selection for selection in selections if selection["acceptance_status"] == "accepted"
+    ]
+    selection_uncertain_rate = _rate(accepted_selections, "selection_uncertain")
+    baseline_comparison = _baseline_comparison(candidates, selections)
     metrics = {
         "request_schema_valid_rate": request_schema_valid_rate,
         "candidate_unique_ratio": candidate_unique_ratio,
+        "candidate_role_compliance_rate": candidate_role_compliance_rate,
+        "executed_candidate_unique_ratio": action_diversity["mean_executed_unique_ratio"],
         "candidate_post_repair_hard_feasible_rate": candidate_summary[
             "post_repair_hard_feasible_rate"
         ],
         "candidate_fallback_rate": candidate_summary["fallback_rate"],
         "candidate_p95_repair_distance": candidate_summary["p95_repair_distance"],
-        "demonstration_acceptance_rate": (
-            len(demonstrations) / len(states) if states else 0.0
-        ),
+        "selected_fallback_rate": selected_summary["fallback_rate"],
+        "selected_p95_repair_distance": selected_summary["p95_repair_distance"],
+        "selection_uncertain_rate": selection_uncertain_rate,
+        "demonstration_acceptance_rate": (len(demonstrations) / len(states) if states else 0.0),
+        "selected_vs_greedy_verified_win_rate": baseline_comparison[
+            "selected_vs_greedy_verified_win_rate"
+        ],
+        "selected_vs_random_verified_win_rate": baseline_comparison[
+            "selected_vs_random_verified_win_rate"
+        ],
+        "mean_greedy_minus_selected_verified_risk": baseline_comparison[
+            "mean_greedy_minus_selected_verified_risk"
+        ],
+        "mean_random_minus_selected_verified_risk": baseline_comparison[
+            "mean_random_minus_selected_verified_risk"
+        ],
     }
 
     gates: dict[str, dict[str, Any]] = {}
@@ -241,9 +356,7 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
         }
 
     repair_reason_counts = Counter(
-        str(reason)
-        for candidate in candidates
-        for reason in candidate.get("repair_reasons", [])
+        str(reason) for candidate in candidates for reason in candidate.get("repair_reasons", [])
     )
     confidence_groups: dict[str, list[dict[str, Any]]] = {}
     for candidate in candidates:
@@ -261,6 +374,13 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
             "demonstrations": len(demonstrations),
         },
         "candidate_summary": candidate_summary,
+        "selected_candidate_summary": selected_summary,
+        "action_diversity": action_diversity,
+        "candidate_role_compliance_rate": candidate_role_compliance_rate,
+        "selection_quality": {
+            "accepted_count": len(accepted_selections),
+            "uncertain_rate": selection_uncertain_rate,
+        },
         "repair_reasons": {
             reason: {
                 "count": count,
@@ -277,7 +397,7 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
             for bucket, records in sorted(confidence_groups.items())
         },
         "state_difficulty": _state_difficulty_rows(states, candidates, selections),
-        "baseline_comparison": _baseline_comparison(candidates, selections),
+        "baseline_comparison": baseline_comparison,
         "scale_up_gates": gates,
         "scale_up_passed": all(bool(gate["passed"]) for gate in gates.values()),
     }

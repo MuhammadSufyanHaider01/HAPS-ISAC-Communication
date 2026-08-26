@@ -44,12 +44,15 @@ Never place Hugging Face or API tokens in an sbatch file.
 Each generation job retains:
 
 - six linked JSONL tables and their Parquet mirrors for states, requests, all K candidates,
-  rollouts, selections, and demonstrations;
+  rollouts, selections, and demonstrations. Rollouts are labeled as teacher candidates or
+  matched greedy/random baselines and retain their common seed for paired analysis;
 - `teacher_server_metrics.jsonl` for request latency, token throughput, failures, and peak memory;
 - `teacher_server.stderr.log` or `vllm.log` for inference diagnostics;
 - timestamped `gpu_metrics.csv` utilization, memory, power, and temperature samples;
 - `audit.json` with quality gates and aggregate metrics;
-- `teacher_quality_report.json` with repair, confidence, difficulty, and baseline diagnostics; and
+- `teacher_quality_report.json` with proposed/executed diversity, selected-action repair and
+  fallback rates, paired selection confidence intervals, difficulty, and matched-horizon
+  baseline diagnostics; and
 - the Slurm stdout log under `results/`.
 
 All canonical table records include UTC timestamps. Smoke jobs flush after every state by default;

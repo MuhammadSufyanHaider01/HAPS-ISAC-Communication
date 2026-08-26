@@ -33,6 +33,8 @@ class SamplingConfig(FrozenModel):
 class VerificationConfig(FrozenModel):
     rollout_horizon_slots: int = Field(gt=0)
     monte_carlo_rollouts: int = Field(gt=0)
+    uncertainty_bootstrap_samples: int = Field(gt=0)
+    uncertainty_confidence_level: float = Field(gt=0.5, lt=1.0)
     shortlist_size: int = Field(gt=0)
     discount_factor: float = Field(gt=0.0, le=1.0)
     cvar_alpha: float = Field(gt=0.0, lt=1.0)

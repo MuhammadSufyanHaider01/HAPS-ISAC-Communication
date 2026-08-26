@@ -138,6 +138,7 @@ def benchmark_teacher(
         prompt = build_teacher_prompt(
             system_config,
             snapshot.observation,
+            snapshot.state,
             snapshot.state_id,
             teacher_config.prompt_version,
             teacher_config.num_candidates,
@@ -240,7 +241,7 @@ def benchmark_teacher(
         selection = select_candidate(
             one_steps,
             summaries,
-            teacher_config.verification.quality_temperature,
+            teacher_config.verification,
         )
         selected_summary = next(
             item for item in summaries if item.candidate_index == selection.selected_candidate_index

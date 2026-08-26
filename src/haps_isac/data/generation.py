@@ -40,6 +40,7 @@ from haps_isac.teachers.base_teacher import (
     MockTeacher,
     TeacherConfig,
     TeacherRequest,
+    VerificationConfig,
 )
 from haps_isac.teachers.gemma_teacher import GemmaTeacher
 from haps_isac.teachers.prompt_builder import build_teacher_prompt
@@ -283,7 +284,11 @@ def _baseline_scores(
     observation: dict[str, np.ndarray],
     state_id: str,
     master_seed: int,
-) -> dict[str, float]:
+    settings: VerificationConfig,
+) -> tuple[
+    dict[str, float],
+    tuple[tuple[str, CandidateRolloutSummary], ...],
+]:
     seed = _stable_seed(master_seed, f"{state_id}:baseline")
     greedy_mapping = GreedyPolicy(env.config.system.num_noma_pairs).act(observation)
     random_mapping = RandomPolicy(
@@ -306,12 +311,38 @@ def _baseline_scores(
             canonical_key=(-2,),
         ),
     )
-    greedy = evaluate_one_step(env, state, baseline_candidates[0], seed)
-    random = evaluate_one_step(env, state, baseline_candidates[1], seed)
-    return {
-        "greedy_one_step_cost": greedy.stage_cost,
-        "random_one_step_cost": random.stage_cost,
-    }
+    one_steps = tuple(
+        evaluate_one_step(env, state, candidate, seed) for candidate in baseline_candidates
+    )
+    summaries = tuple(
+        verify_candidate(
+            env,
+            state,
+            state_id,
+            candidate,
+            master_seed,
+            settings,
+            retain_trajectories=False,
+        )
+        for candidate in baseline_candidates
+    )
+    scores: dict[str, float] = {}
+    labeled_summaries: list[tuple[str, CandidateRolloutSummary]] = []
+    for label, one_step, summary in zip(
+        ("greedy", "random"),
+        one_steps,
+        summaries,
+        strict=True,
+    ):
+        scores[f"{label}_one_step_cost"] = one_step.stage_cost
+        scores[f"{label}_verified_risk_score"] = summary.risk_score
+        scores[f"{label}_verified_mean_cost"] = summary.mean_cost
+        scores[f"{label}_verified_cvar_cost"] = summary.cvar_cost
+        scores[f"{label}_verified_constraint_violation"] = summary.mean_constraint_violation
+        scores[f"{label}_verified_repair_distance"] = summary.mean_repair_distance
+        scores[f"{label}_verified_fallback_rate"] = summary.fallback_rate
+        labeled_summaries.append((f"{label}_baseline", summary))
+    return scores, tuple(labeled_summaries)
 
 
 def _rollout_log(
@@ -319,12 +350,14 @@ def _rollout_log(
     state_id: str,
     rollout: RolloutRecord,
     retain: bool,
+    policy_label: str = "teacher_candidate",
 ) -> RolloutLogRecord:
     metrics = _without(rollout, {"trajectory"})
     return RolloutLogRecord(
         schema_version=SCHEMA_VERSION,
         run_id=run_id,
         state_id=state_id,
+        policy_label=policy_label,
         candidate_index=rollout.candidate_index,
         rollout_index=rollout.rollout_index,
         rollout_seed=rollout.rollout_seed,
@@ -487,7 +520,7 @@ def _verify_and_log(
     selection = select_candidate(
         one_steps,
         summaries,
-        teacher_config.verification.quality_temperature,
+        teacher_config.verification,
     )
     summary_map = {item.candidate_index: item for item in summaries}
     rankings = _ranking_map(selection)
@@ -566,13 +599,26 @@ def _verify_and_log(
             ),
         )
 
-    baseline_scores = _baseline_scores(
+    baseline_scores, baseline_summaries = _baseline_scores(
         env,
         state,
         {key: np.asarray(value) for key, value in observation_payload.items()},
         state_id,
         master_seed,
+        teacher_config.verification,
     )
+    for policy_label, baseline_summary in baseline_summaries:
+        for rollout in baseline_summary.rollouts:
+            writer.append(
+                "rollouts",
+                _rollout_log(
+                    run_id,
+                    state_id,
+                    rollout,
+                    retain=False,
+                    policy_label=policy_label,
+                ),
+            )
     writer.append(
         "selections",
         SelectionLogRecord(
@@ -583,6 +629,9 @@ def _verify_and_log(
             score_margin=selection.score_margin,
             standardized_margin=selection.standardized_margin,
             selection_uncertain=selection.selection_uncertain,
+            margin_confidence_lower=selection.margin_confidence_lower,
+            margin_confidence_upper=selection.margin_confidence_upper,
+            selection_probability=selection.selection_probability,
             baseline_scores=baseline_scores,
             oracle_regret=None,
             acceptance_status="accepted",
@@ -668,6 +717,7 @@ def generate_demonstrations(
             prompt = build_teacher_prompt(
                 system_config,
                 observation,
+                state,
                 state_id,
                 teacher_config.prompt_version,
                 teacher_config.num_candidates,
@@ -684,6 +734,7 @@ def generate_demonstrations(
                     split=split,
                     causal_state_hash=prompt.causal_state_hash,
                     observation=prompt.causal_payload,
+                    teacher_guidance={"sic_safe_templates": prompt.sic_safe_templates},
                     state_metrics=_state_metrics(state),
                     verifier_only=_verifier_only(state),
                 ),
@@ -728,6 +779,9 @@ def generate_demonstrations(
                         score_margin=0.0,
                         standardized_margin=0.0,
                         selection_uncertain=True,
+                        margin_confidence_lower=0.0,
+                        margin_confidence_upper=0.0,
+                        selection_probability=0.0,
                         baseline_scores={},
                         oracle_regret=None,
                         acceptance_status="rejected",

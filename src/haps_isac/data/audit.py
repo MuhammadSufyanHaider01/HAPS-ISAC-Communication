@@ -9,6 +9,18 @@ import numpy as np
 
 from haps_isac.data.dataset_loader import DatasetLoader
 
+ACTION_FIELDS = (
+    "pair",
+    "ris_code",
+    "eta_haps",
+    "eta_communication",
+    "eta_near",
+    "eta_jamming",
+    "aav_heading_rad",
+    "aav_speed_fraction",
+    "eta_cpu",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class DatasetAudit:
@@ -131,6 +143,62 @@ def audit_dataset(directory: str) -> DatasetAudit:
     fallback_rate = (
         float(np.mean([record["fallback_used"] for record in candidates])) if candidates else 0.0
     )
+    selected_candidates = [record for record in candidates if bool(record["selected"])]
+    selected_fallback_rate = (
+        float(np.mean([record["fallback_used"] for record in selected_candidates]))
+        if selected_candidates
+        else 0.0
+    )
+    selected_p95_repair_distance = _quantile(
+        selected_candidates,
+        "repair_distance",
+        0.95,
+    )
+    candidate_records_by_state: dict[str, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        candidate_records_by_state.setdefault(str(candidate["state_id"]), []).append(candidate)
+    executed_unique_ratios = [
+        len(
+            {
+                tuple(round(float(record["executed_action"][field]), 8) for field in ACTION_FIELDS)
+                for record in records
+            }
+        )
+        / max(1, len(records))
+        for records in candidate_records_by_state.values()
+    ]
+    executed_candidate_unique_ratio = (
+        float(np.mean(executed_unique_ratios)) if executed_unique_ratios else 0.0
+    )
+    candidate_role_compliance_rate = (
+        float(
+            np.mean(
+                [
+                    sum(int(record["proposed_action"]["pair"]) == 0 for record in records) == 1
+                    for records in candidate_records_by_state.values()
+                ]
+            )
+        )
+        if candidate_records_by_state
+        else 0.0
+    )
+    selected_by_state = {str(record["state_id"]): record for record in selected_candidates}
+    selected_risks: list[float] = []
+    greedy_risks: list[float] = []
+    random_risks: list[float] = []
+    for selection in selections:
+        selected = selected_by_state.get(str(selection["state_id"]))
+        baselines = selection.get("baseline_scores", {})
+        summary = (selected or {}).get("rollout_summary") or {}
+        if (
+            "risk_score" not in summary
+            or "greedy_verified_risk_score" not in baselines
+            or "random_verified_risk_score" not in baselines
+        ):
+            continue
+        selected_risks.append(float(summary["risk_score"]))
+        greedy_risks.append(float(baselines["greedy_verified_risk_score"]))
+        random_risks.append(float(baselines["random_verified_risk_score"]))
     accepted_selections = [
         record for record in selections if record["acceptance_status"] == "accepted"
     ]
@@ -156,6 +224,53 @@ def audit_dataset(directory: str) -> DatasetAudit:
     metrics = {
         "request_schema_valid_rate": parse_rate,
         "candidate_unique_ratio": unique_ratio,
+        "candidate_role_compliance_rate": candidate_role_compliance_rate,
+        "executed_candidate_unique_ratio": executed_candidate_unique_ratio,
+        "selected_fallback_rate": selected_fallback_rate,
+        "selected_p95_repair_distance": selected_p95_repair_distance,
+        "verified_baseline_compared_states": float(len(selected_risks)),
+        "selected_vs_greedy_verified_win_rate": (
+            float(
+                np.mean(
+                    [
+                        selected < baseline
+                        for selected, baseline in zip(
+                            selected_risks,
+                            greedy_risks,
+                            strict=True,
+                        )
+                    ]
+                )
+            )
+            if selected_risks
+            else 0.0
+        ),
+        "selected_vs_random_verified_win_rate": (
+            float(
+                np.mean(
+                    [
+                        selected < baseline
+                        for selected, baseline in zip(
+                            selected_risks,
+                            random_risks,
+                            strict=True,
+                        )
+                    ]
+                )
+            )
+            if selected_risks
+            else 0.0
+        ),
+        "mean_greedy_minus_selected_verified_risk": (
+            float(np.mean(np.asarray(greedy_risks) - np.asarray(selected_risks)))
+            if selected_risks
+            else 0.0
+        ),
+        "mean_random_minus_selected_verified_risk": (
+            float(np.mean(np.asarray(random_risks) - np.asarray(selected_risks)))
+            if selected_risks
+            else 0.0
+        ),
         "candidate_pre_repair_feasible_rate": pre_repair_rate,
         "candidate_post_repair_hard_feasible_rate": candidate_hard_rate,
         "candidate_repair_rate": (
@@ -187,8 +302,23 @@ def audit_dataset(directory: str) -> DatasetAudit:
         warnings.append("candidate fallback rate is above 5%")
     if metrics["candidate_p95_repair_distance"] > 0.25:
         warnings.append("candidate p95 repair distance is above 0.25")
-    if uncertain_rate > 0.25:
-        warnings.append("more than 25% of accepted selections are statistically uncertain")
+    if candidate_role_compliance_rate < 0.95:
+        warnings.append("fewer than 95% of states have exactly one sensing-only candidate")
+    if executed_candidate_unique_ratio < 0.75:
+        warnings.append("post-repair candidate uniqueness is below 75%")
+    if selected_fallback_rate > 0.0:
+        warnings.append("at least one selected demonstration used fallback")
+    if selected_p95_repair_distance > 0.05:
+        warnings.append("selected-candidate p95 repair distance is above 0.05")
+    if uncertain_rate > 0.05:
+        warnings.append("more than 5% of accepted selections are statistically uncertain")
+    if selected_risks:
+        greedy_win_rate = metrics["selected_vs_greedy_verified_win_rate"]
+        random_win_rate = metrics["selected_vs_random_verified_win_rate"]
+        if greedy_win_rate < 0.55:
+            warnings.append("selected candidates do not beat verified greedy in 55% of states")
+        if random_win_rate < 0.55:
+            warnings.append("selected candidates do not beat verified random in 55% of states")
     if candidate_hard_rate < 1.0 or rollout_hard_rate < 1.0:
         errors.append("post-repair hard feasibility must be 100%")
 

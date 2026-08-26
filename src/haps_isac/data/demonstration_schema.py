@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 from pydantic import BaseModel
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def utc_now() -> str:
@@ -89,6 +89,7 @@ class StateLogRecord:
     split: str
     causal_state_hash: str
     observation: dict[str, Any]
+    teacher_guidance: dict[str, Any]
     state_metrics: dict[str, Any]
     verifier_only: dict[str, Any]
     logged_at: str = field(default_factory=utc_now)
@@ -166,6 +167,7 @@ class RolloutLogRecord:
     schema_version: int
     run_id: str
     state_id: str
+    policy_label: str
     candidate_index: int
     rollout_index: int
     rollout_seed: int
@@ -184,6 +186,9 @@ class SelectionLogRecord:
     score_margin: float
     standardized_margin: float
     selection_uncertain: bool
+    margin_confidence_lower: float
+    margin_confidence_upper: float
+    selection_probability: float
     baseline_scores: dict[str, float]
     oracle_regret: float | None
     acceptance_status: str

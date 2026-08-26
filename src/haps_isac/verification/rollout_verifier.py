@@ -171,6 +171,32 @@ def run_candidate_rollout(
     )
 
 
+def risk_score_from_rollouts(
+    rollouts: tuple[RolloutRecord, ...],
+    settings: VerificationConfig,
+) -> float:
+    """Recompute the complete risk score for an aligned rollout sample."""
+
+    if not rollouts:
+        raise ValueError("at least one rollout is required")
+    costs = np.asarray([item.discounted_cost for item in rollouts], dtype=np.float64)
+    threshold = float(np.quantile(costs, settings.cvar_alpha))
+    cvar = float(np.mean(costs[costs >= threshold]))
+    mean_cost = float(np.mean(costs))
+    constraint_violation = float(np.mean([item.mean_constraint_violation for item in rollouts]))
+    repair_distance = float(np.mean([item.mean_repair_distance for item in rollouts]))
+    fallback_rate = float(np.mean([item.fallback_rate for item in rollouts]))
+    feasible_probability = float(np.mean([item.hard_feasible for item in rollouts]))
+    return float(
+        mean_cost
+        + settings.cvar_weight * (cvar - mean_cost)
+        + settings.constraint_weight * constraint_violation
+        + settings.repair_weight * repair_distance
+        + settings.fallback_weight * fallback_rate
+        + 1_000.0 * (1.0 - feasible_probability)
+    )
+
+
 def summarize_rollouts(
     candidate_index: int,
     rollouts: tuple[RolloutRecord, ...],
@@ -187,14 +213,7 @@ def summarize_rollouts(
     repair_distance = float(np.mean([item.mean_repair_distance for item in rollouts]))
     fallback_rate = float(np.mean([item.fallback_rate for item in rollouts]))
     feasible_probability = float(np.mean([item.hard_feasible for item in rollouts]))
-    risk_score = (
-        mean_cost
-        + settings.cvar_weight * (cvar - mean_cost)
-        + settings.constraint_weight * constraint_violation
-        + settings.repair_weight * repair_distance
-        + settings.fallback_weight * fallback_rate
-        + 1_000.0 * (1.0 - feasible_probability)
-    )
+    risk_score = risk_score_from_rollouts(rollouts, settings)
     return CandidateRolloutSummary(
         candidate_index=candidate_index,
         rollout_count=len(rollouts),
