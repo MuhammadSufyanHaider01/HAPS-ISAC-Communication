@@ -109,6 +109,80 @@ def audit_dataset(directory: str) -> DatasetAudit:
         if key not in selected_keys:
             errors.append(f"demonstration {key[0]} does not reference a selected candidate")
 
+    candidate_lookup = {
+        (str(record["state_id"]), int(record["candidate_index"])): record for record in candidates
+    }
+    valid_targets = 0
+    for demonstration in demonstrations:
+        state_id = str(demonstration["state_id"])
+        targets = demonstration.get("target_candidates")
+        if targets is None:
+            valid_targets += 1
+            continue
+        target_errors: list[str] = []
+        if not isinstance(targets, list) or not targets:
+            target_errors.append("has no distillation targets")
+        elif any(not isinstance(target, dict) for target in targets):
+            target_errors.append("contains a non-object distillation target")
+        else:
+            try:
+                weights = [float(target.get("weight", -1.0)) for target in targets]
+                target_indices = [int(target.get("candidate_index", -1)) for target in targets]
+            except (TypeError, ValueError):
+                weights = [-1.0]
+                target_indices = [-1]
+                target_errors.append("contains malformed distillation target values")
+            if not all(np.isfinite(weight) and weight >= 0.0 for weight in weights):
+                target_errors.append("has invalid distillation weights")
+            if abs(sum(weights) - 1.0) > 1e-6:
+                target_errors.append("distillation weights do not sum to one")
+            if len(target_indices) != len(set(target_indices)):
+                target_errors.append("contains duplicate distillation candidates")
+            for target, candidate_index in zip(targets, target_indices, strict=True):
+                candidate = candidate_lookup.get((state_id, candidate_index))
+                if candidate is None:
+                    target_errors.append(f"references missing candidate {candidate_index}")
+                elif target.get("action") != candidate.get("executed_action"):
+                    target_errors.append(f"action differs from candidate {candidate_index}")
+        if target_errors:
+            errors.extend(f"demonstration {state_id} {message}" for message in target_errors)
+        else:
+            valid_targets += 1
+
+    schema_version = int(loader.manifest.get("schema_version", 0))
+    if schema_version >= 4:
+        global_indices = [int(record.get("global_state_index", -1)) for record in states]
+        if len(global_indices) != len(set(global_indices)):
+            errors.append("global state indices are duplicated")
+        start = int(loader.manifest.get("global_state_start", 0))
+        stop = int(loader.manifest.get("global_state_stop", start + len(states)))
+        if set(global_indices) != set(range(start, stop)):
+            errors.append("global state indices do not exactly cover the manifest range")
+        causal_hashes = [str(record.get("causal_state_hash", "")) for record in states]
+        if len(causal_hashes) != len(set(causal_hashes)):
+            errors.append("causal states are duplicated")
+
+        rollout_counts_by_state: dict[str, int] = {}
+        for record in rollouts:
+            state_id = str(record["state_id"])
+            rollout_counts_by_state[state_id] = rollout_counts_by_state.get(state_id, 0) + 1
+        for selection in selections:
+            if selection.get("acceptance_status") != "accepted":
+                continue
+            state_id = str(selection["state_id"])
+            verification_rollouts = int(selection.get("verification_rollouts", 0))
+            verified_candidates = sum(
+                bool(record.get("rollout_verified"))
+                for record in candidates
+                if str(record["state_id"]) == state_id
+            )
+            expected_rollouts = (verified_candidates + 2) * verification_rollouts
+            if (
+                verification_rollouts <= 0
+                or rollout_counts_by_state.get(state_id, 0) != expected_rollouts
+            ):
+                errors.append(f"{state_id} has an incomplete adaptive rollout transaction")
+
     scenario_splits: dict[str, set[str]] = {}
     for record in states:
         scenario_splits.setdefault(str(record["scenario_id"]), set()).add(str(record["split"]))
@@ -207,6 +281,22 @@ def audit_dataset(directory: str) -> DatasetAudit:
         if accepted_selections
         else 0.0
     )
+    unresolved_rate = (
+        float(
+            np.mean(
+                [
+                    record.get("decision_status") == "unresolved"
+                    or (
+                        record.get("decision_status") is None
+                        and bool(record.get("selection_uncertain", True))
+                    )
+                    for record in accepted_selections
+                ]
+            )
+        )
+        if accepted_selections
+        else 0.0
+    )
     rollout_hard_rate = (
         float(np.mean([record["metrics"]["hard_feasible"] for record in rollouts]))
         if rollouts
@@ -286,6 +376,10 @@ def audit_dataset(directory: str) -> DatasetAudit:
         ),
         "candidate_fallback_rate": fallback_rate,
         "selection_uncertain_rate": uncertain_rate,
+        "selection_unresolved_rate": unresolved_rate,
+        "distillation_target_valid_rate": (
+            valid_targets / len(demonstrations) if demonstrations else 0.0
+        ),
         "demonstration_acceptance_rate": (len(demonstrations) / len(states) if states else 0.0),
         "rollout_hard_feasible_rate": rollout_hard_rate,
         "rollout_retained_trajectory_rate": retained_rate,
@@ -310,8 +404,10 @@ def audit_dataset(directory: str) -> DatasetAudit:
         warnings.append("at least one selected demonstration used fallback")
     if selected_p95_repair_distance > 0.05:
         warnings.append("selected-candidate p95 repair distance is above 0.05")
-    if uncertain_rate > 0.05:
-        warnings.append("more than 5% of accepted selections are statistically uncertain")
+    if unresolved_rate > 0.05:
+        warnings.append("more than 5% of accepted selections remain unresolved after verification")
+    elif uncertain_rate > 0.05:
+        warnings.append("confidence intervals overlap, but labels are practically equivalent")
     if selected_risks:
         greedy_win_rate = metrics["selected_vs_greedy_verified_win_rate"]
         random_win_rate = metrics["selected_vs_random_verified_win_rate"]

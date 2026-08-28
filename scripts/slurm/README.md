@@ -23,7 +23,7 @@ HAPS_TEACHER_MODEL=Qwen/Qwen3.5-27B \
   sbatch scripts/slurm/serve_teacher.sbatch
 ~~~
 
-Generate a bounded, fully verified smoke dataset in one allocation:
+Generate a bounded diagnostic shard in one allocation:
 
 ~~~bash
 HAPS_TEACHER_BACKEND=transformers \
@@ -33,26 +33,88 @@ HAPS_RUN_ID=qwen-smoke-001 \
   scripts/slurm/submit_teacher_dataset.sh
 ~~~
 
-The wrapper records the commit and dirty state on the login node so queued jobs retain
-reproducible source metadata even when Git is unavailable on compute nodes.
+The single-job wrapper permits a dirty tree for diagnostics. It records the commit and dirty state
+on the login node so queued jobs retain reproducible source metadata even when Git is unavailable
+on compute nodes. Its default output is
+`datasets/qwen-smoke-001/shards/shard-000`.
 
-Scale only after the smoke dataset passes its audit. Runtime overrides include
+## Qualification and production workflow
+
+The workflow wrapper requires a clean commit, submits a resumable GPU array, then submits a CPU
+merge job with an `afterok` dependency. The merge validates that every shard used the same clean
+commit, configuration hash, master seed, and complete non-overlapping global state range. It then
+runs the integrity audit and aggregate scale-up gates.
+
+Run the next 200-state qualification before production:
+
+~~~bash
+HAPS_TEACHER_BACKEND=transformers \
+HAPS_PYTHON_ENVIRONMENT=.venv-gpu \
+HAPS_DATASET_STATES=200 \
+HAPS_SHARD_COUNT=1 \
+HAPS_RUN_ID=qwen-v1.4-qualification-200 \
+  scripts/slurm/submit_teacher_dataset_workflow.sh
+~~~
+
+Only if the merged qualification report has `audit_passed=true` and `scale_up_passed=true`, submit
+the planned 5,000-state dataset. Ten 500-state shards fit independently within the 24-hour GPU
+limit; the concurrency cap can be adjusted to match available GPUs.
+
+~~~bash
+HAPS_TEACHER_BACKEND=transformers \
+HAPS_PYTHON_ENVIRONMENT=.venv-gpu \
+HAPS_DATASET_STATES=5000 \
+HAPS_SHARD_COUNT=10 \
+HAPS_MAX_PARALLEL_SHARDS=2 \
+HAPS_RUN_ID=qwen-v1.4-production-5000 \
+  scripts/slurm/submit_teacher_dataset_workflow.sh
+~~~
+
+The wrapper prints both Slurm job IDs. Closing the SSH window does not stop submitted jobs. Every
+array task defaults to `HAPS_RESUME=1`: resubmitting the same clean code, run ID, state count, seed,
+and shard plan trims an interrupted shard to its last complete state and continues. A resume is
+rejected if any provenance field differs. Do not set one shared `HAPS_OUTPUT_DIRECTORY` for a
+multi-task array; set `HAPS_DATASET_ROOT` if the whole dataset needs a custom location.
+
+The default layout is:
+
+~~~text
+datasets/<run-id>/
+  shards/shard-000/ ... shard-NNN/
+  merged/
+    manifest.json
+    shards.json
+    audit.json
+    teacher_quality_report.json
+~~~
+
+Runtime overrides include
 `HAPS_TEACHER_MODEL`, `HAPS_TEACHER_REVISION`, `HAPS_TEACHER_BACKEND`,
-`HAPS_DATASET_STATES`, `HAPS_OUTPUT_DIRECTORY`, and `HAPS_LOG_FLUSH_EVERY`.
+`HAPS_DATASET_STATES`, `HAPS_SHARD_COUNT`, `HAPS_MAX_PARALLEL_SHARDS`,
+`HAPS_DATASET_ROOT`, `HAPS_LOG_FLUSH_EVERY`, and `HAPS_RESUME`.
 Never place Hugging Face or API tokens in an sbatch file.
 
 Each generation job retains:
 
 - six linked JSONL tables and their Parquet mirrors for states, requests, all K candidates,
   rollouts, selections, and demonstrations. Rollouts are labeled as teacher candidates or
-  matched greedy/random baselines and retain their common seed for paired analysis;
+  matched greedy/random baselines and retain their common seed for paired analysis. Demonstrations
+  include normalized multi-candidate soft targets for practically equivalent actions;
 - `teacher_server_metrics.jsonl` for request latency, token throughput, failures, and peak memory;
 - `teacher_server.stderr.log` or `vllm.log` for inference diagnostics;
 - timestamped `gpu_metrics.csv` utilization, memory, power, and temperature samples;
-- `audit.json` with quality gates and aggregate metrics;
+- `audit.json` with linked-table, global-index, split, soft-target, and rollout-transaction checks;
 - `teacher_quality_report.json` with proposed/executed diversity, selected-action repair and
-  fallback rates, paired selection confidence intervals, difficulty, and matched-horizon
-  baseline diagnostics; and
+  fallback rates, raw confidence overlap, decisive/equivalent/unresolved decisions, adaptive
+  rollout counts, target entropy, state/split quota error, duplication, difficulty, and
+  matched-horizon baseline diagnostics; and
 - the Slurm stdout log under `results/`.
 
-All canonical table records include UTC timestamps. Smoke jobs flush after every state by default;
+The aggregate scale-up decision gates on unresolved selections rather than treating statistically
+overlapping but practically equivalent actions as failures. It also requires valid normalized
+soft targets, no duplicate causal states, exact sampling within tolerance, 100% hard feasibility,
+bounded repair/fallback rates, and verified baseline wins. Raw selection uncertainty remains in
+the report for plotting.
+
+All canonical table records include UTC timestamps. Qualification jobs should flush after every
+state; production can raise `HAPS_LOG_FLUSH_EVERY` to reduce filesystem overhead.

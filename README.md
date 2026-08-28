@@ -6,7 +6,7 @@ Simulator-verified reasoning distillation and constrained reinforcement learning
 
 The validated Version 1 research environment is implemented. It includes fixed near/far NOMA pairs, causal communication and target sensing, target/eavesdropper reception, AoI/AoLI/AoSI, EKF tracking, CPU-delayed estimate availability, virtual queues, physical action completion, deterministic repair/fallback, reproducible state cloning, random and greedy baselines, and a reduced-grid one-step oracle.
 
-The offline teacher-generation phase is also implemented: Qwen/Gemma-compatible adapters, causal versioned prompts, strict response parsing, content-addressed caching, common-random rollout verification, CVaR-aware candidate selection, plotting-ready linked logs, dataset auditing, a fair frozen-state teacher tournament, and Slurm/vLLM templates. The complete path passes a deterministic mock-teacher smoke test; a production Qwen/Gemma dataset has not yet been generated.
+The offline teacher-generation phase is implemented through schema v4: Qwen/Gemma-compatible adapters, causal versioned prompts, strict parsing, content-addressed caching, adaptive common-random rollout verification, practical-equivalence soft labels, exact stratified sampling, plotting-ready linked logs, crash-resumable shards, validated merging, dataset auditing, and Slurm workflows. The complete path passes deterministic mock-teacher resume/merge tests; the final production Qwen dataset has not yet been generated.
 
 Version 2 components—RIS, AAV jamming and mobility, residual self-interference, imperfect CSI/SIC, and stochastic blockage—remain disabled behind the configuration contract. Student distillation, active correction, and constrained PPO have not started.
 
@@ -22,8 +22,8 @@ Version 2 components—RIS, AAV jamming and mobility, residual self-interference
 causal numerical state
   -> reasoning-teacher candidates
   -> physics completion and safety repair
-  -> stochastic rollout verification
-  -> verified demonstration dataset
+  -> adaptive stochastic rollout verification
+  -> weighted verified demonstration dataset
   -> numerical student distillation
   -> active correction
   -> constrained PPO refinement

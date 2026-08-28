@@ -22,6 +22,10 @@ class DemonstrationBatch:
     scheduled_pair: npt.NDArray[np.int64]
     continuous_action: npt.NDArray[np.float32]
     quality_weight: npt.NDArray[np.float32]
+    target_pair: npt.NDArray[np.int64]
+    target_continuous_action: npt.NDArray[np.float32]
+    target_weight: npt.NDArray[np.float32]
+    target_mask: npt.NDArray[np.int8]
 
 
 class DatasetLoader:
@@ -80,6 +84,32 @@ def _stack_batch(records: list[dict[str, Any]]) -> DemonstrationBatch:
         "aav_speed_fraction",
         "eta_cpu",
     )
+    target_sets = [
+        record.get("target_candidates")
+        or [
+            {
+                "candidate_index": record["selected_candidate_index"],
+                "action": record["selected_action"],
+                "weight": 1.0,
+                "verifier_score": record["verifier_score"],
+            }
+        ]
+        for record in records
+    ]
+    maximum_targets = max(len(targets) for targets in target_sets)
+    target_pair = np.zeros((len(records), maximum_targets), dtype=np.int64)
+    target_continuous = np.zeros(
+        (len(records), maximum_targets, len(continuous_names)), dtype=np.float32
+    )
+    target_weight = np.zeros((len(records), maximum_targets), dtype=np.float32)
+    target_mask = np.zeros((len(records), maximum_targets), dtype=np.int8)
+    for row, targets in enumerate(target_sets):
+        for column, target in enumerate(targets):
+            action = target["action"]
+            target_pair[row, column] = int(action["pair"])
+            target_continuous[row, column] = [action[name] for name in continuous_names]
+            target_weight[row, column] = float(target["weight"])
+            target_mask[row, column] = 1
     return DemonstrationBatch(
         pair_tokens=np.asarray([item["pair_tokens"] for item in observations], dtype=np.float32),
         pair_mask=np.asarray([item["pair_mask"] for item in observations], dtype=np.int8),
@@ -100,4 +130,8 @@ def _stack_batch(records: list[dict[str, Any]]) -> DemonstrationBatch:
         quality_weight=np.asarray(
             [record["quality_weight"] for record in records], dtype=np.float32
         ),
+        target_pair=target_pair,
+        target_continuous_action=target_continuous,
+        target_weight=target_weight,
+        target_mask=target_mask,
     )

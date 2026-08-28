@@ -21,8 +21,11 @@ sampling:
 verification:
   rollout_horizon_slots: 32
   monte_carlo_rollouts: 8
+  max_monte_carlo_rollouts: 32
+  rollout_batch_size: 8
   uncertainty_bootstrap_samples: 2000
   uncertainty_confidence_level: 0.95
+  practical_equivalence_margin: 0.01
   shortlist_size: 3
   discount_factor: 0.995
   cvar_alpha: 0.90
@@ -31,6 +34,20 @@ verification:
   repair_weight: 0.25
   fallback_weight: 2.0
   quality_temperature: 0.10
+
+dataset:
+  strategy: stratified
+  state_fractions:
+    ordinary: 0.35
+    freshness_stress: 0.25
+    sensing_stress: 0.15
+    secrecy_stress: 0.15
+    boundary_rare: 0.10
+  split_fractions:
+    train: 0.70
+    validation: 0.15
+    test: 0.15
+  maximum_rollin_slots: 32
 
 logging:
   flush_every: 32

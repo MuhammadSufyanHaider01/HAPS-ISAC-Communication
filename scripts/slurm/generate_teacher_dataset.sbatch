@@ -5,10 +5,29 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=192G
 #SBATCH --time=24:00:00
-#SBATCH --output=results/haps-dataset-%j.out
+#SBATCH --output=results/haps-dataset-%A_%a.out
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR}"
+
+if [[ -n "${HAPS_GIT_COMMIT:-}" ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  runtime_commit="$(git rev-parse HEAD)"
+  if [[ -n "$(git status --porcelain)" ]]; then
+    runtime_dirty=1
+  else
+    runtime_dirty=0
+  fi
+  if [[ "${runtime_commit}" != "${HAPS_GIT_COMMIT}" ]]; then
+    printf 'Queued commit %s differs from runtime commit %s\n' \
+      "${HAPS_GIT_COMMIT}" "${runtime_commit}" >&2
+    exit 2
+  fi
+  if [[ -n "${HAPS_GIT_DIRTY:-}" ]] && [[ "${runtime_dirty}" != "${HAPS_GIT_DIRTY}" ]]; then
+    printf 'Queued dirty state %s differs from runtime dirty state %s\n' \
+      "${HAPS_GIT_DIRTY}" "${runtime_dirty}" >&2
+    exit 2
+  fi
+fi
 
 module load cuda/12.6.2 python/3.12.5
 python_environment="${HAPS_PYTHON_ENVIRONMENT:-.venv-gpu}"
@@ -18,16 +37,22 @@ teacher_model="${HAPS_TEACHER_MODEL:-Qwen/Qwen3.5-27B}"
 teacher_revision="${HAPS_TEACHER_REVISION:-fc05daec18b0a78c049392ed2e771dde82bdf654}"
 teacher_provider="${HAPS_TEACHER_PROVIDER:-qwen}"
 teacher_backend="${HAPS_TEACHER_BACKEND:-transformers}"
-teacher_port="${HAPS_TEACHER_PORT:-8000}"
 tensor_parallel="${HAPS_TENSOR_PARALLEL_SIZE:-1}"
 max_model_length="${HAPS_MAX_MODEL_LENGTH:-8192}"
 gpu_utilization="${HAPS_GPU_MEMORY_UTILIZATION:-0.90}"
 dataset_states="${HAPS_DATASET_STATES:-100}"
 run_id="${HAPS_RUN_ID:-teacher-${SLURM_JOB_ID}}"
-output_directory="${HAPS_OUTPUT_DIRECTORY:-datasets/${run_id}}"
+shard_index="${HAPS_SHARD_INDEX:-${SLURM_ARRAY_TASK_ID:-0}}"
+shard_count="${HAPS_SHARD_COUNT:-1}"
+teacher_port="${HAPS_TEACHER_PORT:-$((18000 + (SLURM_JOB_ID + shard_index) % 20000))}"
+printf -v shard_label '%03d' "${shard_index}"
+dataset_root="${HAPS_DATASET_ROOT:-datasets/${run_id}}"
+output_directory="${HAPS_OUTPUT_DIRECTORY:-${dataset_root}/shards/shard-${shard_label}}"
+shard_run_id="${run_id}-shard-${shard_label}"
 cache_root="${HAPS_CACHE_ROOT:-/home/muhammadsufyan.haide/.cache/haps-isac}"
 flush_every="${HAPS_LOG_FLUSH_EVERY:-1}"
 startup_timeout_s="${HAPS_SERVER_STARTUP_TIMEOUT_S:-3600}"
+resume="${HAPS_RESUME:-1}"
 
 export HF_HOME="${HF_HOME:-${cache_root}/huggingface}"
 export HF_HUB_OFFLINE="${HAPS_HF_HUB_OFFLINE:-1}"
@@ -104,6 +129,11 @@ if [[ "${server_ready}" -ne 1 ]]; then
   exit 1
 fi
 
+resume_args=()
+if [[ "${resume}" == "1" ]]; then
+  resume_args+=(--resume)
+fi
+
 "${python_environment}/bin/python" scripts/generate_demonstrations.py \
   --system-config configs/system_v1.yaml \
   --teacher-config configs/teacher.yaml \
@@ -112,9 +142,12 @@ fi
   --model-revision "${teacher_revision}" \
   --base-url "http://127.0.0.1:${teacher_port}/v1" \
   --states "${dataset_states}" \
-  --run-id "${run_id}" \
+  --shard-index "${shard_index}" \
+  --shard-count "${shard_count}" \
+  --run-id "${shard_run_id}" \
   --output "${output_directory}" \
-  --flush-every "${flush_every}"
+  --flush-every "${flush_every}" \
+  "${resume_args[@]}"
 
 "${python_environment}/bin/python" scripts/report_teacher_quality.py "${output_directory}" \
   --output "${output_directory}/teacher_quality_report.json" \

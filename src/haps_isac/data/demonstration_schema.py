@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 from pydantic import BaseModel
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def utc_now() -> str:
@@ -76,6 +76,15 @@ class RunManifest:
     slurm_job_id: str | None
     table_counts: dict[str, int]
     export_errors: tuple[str, ...] = ()
+    max_monte_carlo_rollouts: int | None = None
+    total_requested_states: int | None = None
+    global_state_start: int = 0
+    global_state_stop: int | None = None
+    shard_index: int = 0
+    shard_count: int = 1
+    sampling_strategy: str = "sequential"
+    state_distribution: dict[str, float] = field(default_factory=dict)
+    split_fractions: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +101,9 @@ class StateLogRecord:
     teacher_guidance: dict[str, Any]
     state_metrics: dict[str, Any]
     verifier_only: dict[str, Any]
+    global_state_index: int
+    state_category: str
+    sampling_seed: int
     logged_at: str = field(default_factory=utc_now)
 
 
@@ -193,7 +205,20 @@ class SelectionLogRecord:
     oracle_regret: float | None
     acceptance_status: str
     acceptance_reason: str
+    decision_status: str
+    practical_equivalence_margin: float
+    equivalent_candidate_indices: tuple[int, ...]
+    verification_rollouts: int
+    adaptive_rounds: int
     logged_at: str = field(default_factory=utc_now)
+
+
+@dataclass(frozen=True, slots=True)
+class DistillationTargetRecord:
+    candidate_index: int
+    action: dict[str, Any]
+    weight: float
+    verifier_score: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,4 +237,7 @@ class DemonstrationRecord:
     repair_distance: float
     fallback_used: bool
     selection_uncertain: bool
+    decision_status: str
+    target_candidates: tuple[DistillationTargetRecord, ...]
+    target_entropy: float
     logged_at: str = field(default_factory=utc_now)

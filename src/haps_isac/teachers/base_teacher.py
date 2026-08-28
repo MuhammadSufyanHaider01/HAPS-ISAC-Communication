@@ -33,8 +33,11 @@ class SamplingConfig(FrozenModel):
 class VerificationConfig(FrozenModel):
     rollout_horizon_slots: int = Field(gt=0)
     monte_carlo_rollouts: int = Field(gt=0)
+    max_monte_carlo_rollouts: int = Field(gt=0)
+    rollout_batch_size: int = Field(gt=0)
     uncertainty_bootstrap_samples: int = Field(gt=0)
     uncertainty_confidence_level: float = Field(gt=0.5, lt=1.0)
+    practical_equivalence_margin: float = Field(ge=0.0)
     shortlist_size: int = Field(gt=0)
     discount_factor: float = Field(gt=0.0, le=1.0)
     cvar_alpha: float = Field(gt=0.0, lt=1.0)
@@ -43,6 +46,55 @@ class VerificationConfig(FrozenModel):
     repair_weight: float = Field(ge=0.0)
     fallback_weight: float = Field(ge=0.0)
     quality_temperature: float = Field(gt=0.0)
+
+    @model_validator(mode="after")
+    def validate_adaptive_rollouts(self) -> Self:
+        if self.max_monte_carlo_rollouts < self.monte_carlo_rollouts:
+            raise ValueError("max_monte_carlo_rollouts cannot be below monte_carlo_rollouts")
+        return self
+
+
+class DatasetFractionConfig(FrozenModel):
+    ordinary: float = Field(ge=0.0, le=1.0)
+    freshness_stress: float = Field(ge=0.0, le=1.0)
+    sensing_stress: float = Field(ge=0.0, le=1.0)
+    secrecy_stress: float = Field(ge=0.0, le=1.0)
+    boundary_rare: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_total(self) -> Self:
+        if abs(sum(self.model_dump().values()) - 1.0) > 1e-9:
+            raise ValueError("dataset state fractions must sum to one")
+        return self
+
+
+class DatasetSplitConfig(FrozenModel):
+    train: float = Field(ge=0.0, le=1.0)
+    validation: float = Field(ge=0.0, le=1.0)
+    test: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_total(self) -> Self:
+        if abs(sum(self.model_dump().values()) - 1.0) > 1e-9:
+            raise ValueError("dataset split fractions must sum to one")
+        return self
+
+
+class DatasetSamplingConfig(FrozenModel):
+    strategy: Literal["sequential", "stratified"] = "stratified"
+    state_fractions: DatasetFractionConfig = DatasetFractionConfig(
+        ordinary=0.35,
+        freshness_stress=0.25,
+        sensing_stress=0.15,
+        secrecy_stress=0.15,
+        boundary_rare=0.10,
+    )
+    split_fractions: DatasetSplitConfig = DatasetSplitConfig(
+        train=0.70,
+        validation=0.15,
+        test=0.15,
+    )
+    maximum_rollin_slots: int = Field(default=32, ge=0)
 
 
 class LoggingConfig(FrozenModel):
@@ -68,6 +120,7 @@ class TeacherConfig(FrozenModel):
     cache_directory: str
     sampling: SamplingConfig
     verification: VerificationConfig
+    dataset: DatasetSamplingConfig = DatasetSamplingConfig()
     logging: LoggingConfig
 
     @model_validator(mode="after")

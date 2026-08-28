@@ -246,11 +246,15 @@ def verify_candidate(
     master_seed: int,
     settings: VerificationConfig,
     retain_trajectories: bool = True,
+    rollout_count: int | None = None,
 ) -> CandidateRolloutSummary:
+    effective_count = settings.monte_carlo_rollouts if rollout_count is None else rollout_count
+    if effective_count <= 0 or effective_count > settings.max_monte_carlo_rollouts:
+        raise ValueError("rollout_count must be within the configured adaptive range")
     seeds = common_rollout_seeds(
         state_id,
         master_seed,
-        settings.monte_carlo_rollouts,
+        effective_count,
     )
     rollouts = tuple(
         run_candidate_rollout(

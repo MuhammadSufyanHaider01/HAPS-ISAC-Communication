@@ -19,11 +19,12 @@ from haps_isac.baselines.greedy_policy import GreedyPolicy
 from haps_isac.baselines.random_policy import RandomPolicy
 from haps_isac.config import ExperimentConfig
 from haps_isac.control.action_transform import action_from_mapping
-from haps_isac.data.dataset_writer import DatasetWriter
+from haps_isac.data.dataset_writer import DatasetWriter, prepare_resume_directory
 from haps_isac.data.demonstration_schema import (
     SCHEMA_VERSION,
     CandidateLogRecord,
     DemonstrationRecord,
+    DistillationTargetRecord,
     RolloutLogRecord,
     RunManifest,
     SelectionLogRecord,
@@ -33,6 +34,7 @@ from haps_isac.data.demonstration_schema import (
     utc_now,
 )
 from haps_isac.data.split_manager import assign_split
+from haps_isac.data.state_sampler import StratifiedStateSampler
 from haps_isac.envs.haps_isac_env import HapsIsacEnv
 from haps_isac.envs.state import SimulatorState
 from haps_isac.teachers.base_teacher import (
@@ -66,6 +68,8 @@ from haps_isac.verification.rollout_verifier import (
     CandidateRolloutSummary,
     RolloutRecord,
     common_rollout_seeds,
+    run_candidate_rollout,
+    summarize_rollouts,
     verify_candidate,
 )
 
@@ -190,6 +194,11 @@ def build_manifest(
     system_config: ExperimentConfig,
     teacher_config: TeacherConfig,
     master_seed: int,
+    total_requested_states: int | None = None,
+    global_state_start: int = 0,
+    global_state_stop: int | None = None,
+    shard_index: int = 0,
+    shard_count: int = 1,
 ) -> RunManifest:
     commit, dirty = _git_metadata()
     return RunManifest(
@@ -210,10 +219,19 @@ def build_manifest(
         num_candidates=teacher_config.num_candidates,
         rollout_horizon_slots=teacher_config.verification.rollout_horizon_slots,
         monte_carlo_rollouts=teacher_config.verification.monte_carlo_rollouts,
+        max_monte_carlo_rollouts=teacher_config.verification.max_monte_carlo_rollouts,
         hardware=_hardware_metadata(),
         software=_software_metadata(),
         slurm_job_id=os.environ.get("SLURM_JOB_ID"),
         table_counts={},
+        total_requested_states=total_requested_states,
+        global_state_start=global_state_start,
+        global_state_stop=global_state_stop,
+        shard_index=shard_index,
+        shard_count=shard_count,
+        sampling_strategy=teacher_config.dataset.strategy,
+        state_distribution=teacher_config.dataset.state_fractions.model_dump(),
+        split_fractions=teacher_config.dataset.split_fractions.model_dump(),
     )
 
 
@@ -285,6 +303,7 @@ def _baseline_scores(
     state_id: str,
     master_seed: int,
     settings: VerificationConfig,
+    rollout_count: int,
 ) -> tuple[
     dict[str, float],
     tuple[tuple[str, CandidateRolloutSummary], ...],
@@ -323,6 +342,7 @@ def _baseline_scores(
             master_seed,
             settings,
             retain_trajectories=False,
+            rollout_count=rollout_count,
         )
         for candidate in baseline_candidates
     )
@@ -475,6 +495,59 @@ def _log_valid_request(
     )
 
 
+def _verify_shortlist_adaptively(
+    env: HapsIsacEnv,
+    state: SimulatorState,
+    state_id: str,
+    shortlisted: tuple[ParsedCandidate, ...],
+    one_steps: dict[int, Any],
+    master_seed: int,
+    settings: VerificationConfig,
+) -> tuple[tuple[CandidateRolloutSummary, ...], SelectionResult, int]:
+    """Add aligned rollout batches until the label is decisive, equivalent, or capped."""
+
+    seeds = common_rollout_seeds(state_id, master_seed, settings.max_monte_carlo_rollouts)
+    records: dict[int, list[RolloutRecord]] = {
+        candidate.candidate_index: [] for candidate in shortlisted
+    }
+    rollout_count = settings.monte_carlo_rollouts
+    adaptive_rounds = 0
+    while True:
+        adaptive_rounds += 1
+        for candidate in shortlisted:
+            candidate_records = records[candidate.candidate_index]
+            for rollout_index in range(len(candidate_records), rollout_count):
+                candidate_records.append(
+                    run_candidate_rollout(
+                        env,
+                        state,
+                        candidate,
+                        rollout_index,
+                        seeds[rollout_index],
+                        settings,
+                        retain_trajectory=True,
+                    )
+                )
+        summaries = tuple(
+            summarize_rollouts(
+                candidate.candidate_index,
+                tuple(records[candidate.candidate_index]),
+                settings,
+            )
+            for candidate in shortlisted
+        )
+        selection = select_candidate(one_steps, summaries, settings)
+        if (
+            selection.decision_status != "unresolved"
+            or rollout_count >= settings.max_monte_carlo_rollouts
+        ):
+            return summaries, selection, adaptive_rounds
+        rollout_count = min(
+            settings.max_monte_carlo_rollouts,
+            rollout_count + settings.rollout_batch_size,
+        )
+
+
 def _verify_and_log(
     writer: DatasetWriter,
     run_id: str,
@@ -505,21 +578,13 @@ def _verify_and_log(
             key=lambda item: preliminary_score(one_steps[item.candidate_index]),
         )[: teacher_config.verification.shortlist_size]
     )
-    summaries = tuple(
-        verify_candidate(
-            env,
-            state,
-            state_id,
-            candidate,
-            master_seed,
-            teacher_config.verification,
-            retain_trajectories=True,
-        )
-        for candidate in shortlisted
-    )
-    selection = select_candidate(
+    summaries, selection, adaptive_rounds = _verify_shortlist_adaptively(
+        env,
+        state,
+        state_id,
+        shortlisted,
         one_steps,
-        summaries,
+        master_seed,
         teacher_config.verification,
     )
     summary_map = {item.candidate_index: item for item in summaries}
@@ -606,6 +671,7 @@ def _verify_and_log(
         state_id,
         master_seed,
         teacher_config.verification,
+        selection.verification_rollouts,
     )
     for policy_label, baseline_summary in baseline_summaries:
         for rollout in baseline_summary.rollouts:
@@ -635,13 +701,34 @@ def _verify_and_log(
             baseline_scores=baseline_scores,
             oracle_regret=None,
             acceptance_status="accepted",
-            acceptance_reason="lowest_risk_score_after_common_random_rollouts",
+            acceptance_reason="adaptive_common_random_rollout_ranking",
+            decision_status=selection.decision_status,
+            practical_equivalence_margin=(teacher_config.verification.practical_equivalence_margin),
+            equivalent_candidate_indices=selection.equivalent_candidate_indices,
+            verification_rollouts=selection.verification_rollouts,
+            adaptive_rounds=adaptive_rounds,
         ),
     )
     selected_candidate = parsed.candidates[selected_index]
     selected_evaluation = one_steps[selected_index]
     selected_summary = summary_map[selected_index]
     selected_ranking = rankings[selected_index]
+    target_indices = selection.equivalent_candidate_indices
+    target_weight_total = sum(rankings[index].quality_weight for index in target_indices)
+    target_candidates = tuple(
+        DistillationTargetRecord(
+            candidate_index=index,
+            action=action_as_dict(one_steps[index].executed_action),
+            weight=rankings[index].quality_weight / target_weight_total,
+            verifier_score=summary_map[index].risk_score,
+        )
+        for index in target_indices
+    )
+    minimum_probability = float(np.finfo(np.float64).tiny)
+    target_entropy = -sum(
+        target.weight * float(np.log(max(target.weight, minimum_probability)))
+        for target in target_candidates
+    )
     writer.append(
         "demonstrations",
         DemonstrationRecord(
@@ -659,6 +746,9 @@ def _verify_and_log(
             repair_distance=selected_evaluation.repair_distance,
             fallback_used=selected_evaluation.fallback_used,
             selection_uncertain=selection.selection_uncertain,
+            decision_status=selection.decision_status,
+            target_candidates=target_candidates,
+            target_entropy=target_entropy,
         ),
     )
     return ParsedCandidate(
@@ -680,11 +770,20 @@ def generate_demonstrations(
     master_seed: int,
     run_id: str | None = None,
     export_parquet: bool | None = None,
+    total_states: int | None = None,
+    global_state_start: int = 0,
+    shard_index: int = 0,
+    shard_count: int = 1,
+    resume: bool = False,
 ) -> RunManifest:
     """Generate requested states, logging failures without poisoning demonstrations."""
 
     if requested_states <= 0:
         raise ValueError("requested_states must be positive")
+    effective_total_states = requested_states if total_states is None else total_states
+    global_state_stop = global_state_start + requested_states
+    if global_state_start < 0 or global_state_stop > effective_total_states:
+        raise ValueError("requested shard range is outside total_states")
     effective_run_id = run_id or f"teacher-{uuid.uuid4().hex[:12]}"
     manifest = build_manifest(
         effective_run_id,
@@ -693,27 +792,66 @@ def generate_demonstrations(
         system_config,
         teacher_config,
         master_seed,
+        total_requested_states=effective_total_states,
+        global_state_start=global_state_start,
+        global_state_stop=global_state_stop,
+        shard_index=shard_index,
+        shard_count=shard_count,
+    )
+    completed_states = (
+        prepare_resume_directory(
+            output_directory,
+            teacher_config.num_candidates,
+            teacher_config.verification.shortlist_size,
+        )
+        if resume
+        else 0
     )
     writer = DatasetWriter(
         output_directory,
         manifest,
         flush_every=teacher_config.logging.flush_every,
+        resume=resume,
     )
     teacher = build_teacher(teacher_config, system_config.system.num_noma_pairs)
     env = HapsIsacEnv(system_config)
     greedy = GreedyPolicy(system_config.system.num_noma_pairs)
+    sampler = (
+        StratifiedStateSampler(
+            system_config,
+            teacher_config.dataset,
+            effective_total_states,
+            master_seed,
+        )
+        if teacher_config.dataset.strategy == "stratified"
+        else None
+    )
     episode_id = 0
     observation, _ = env.reset(seed=master_seed)
-    generated = 0
+    generated = completed_states
     try:
         while generated < requested_states:
-            if env.state.slot >= system_config.system.episode_slots:
-                episode_id += 1
-                observation, _ = env.reset(seed=master_seed + episode_id)
-            state = env.state.clone()
-            scenario_id = f"scenario-{master_seed + episode_id}"
-            state_id = f"{effective_run_id}:episode-{episode_id:06d}:slot-{state.slot:05d}"
-            split = assign_split(scenario_id, master_seed)
+            global_state_index = global_state_start + generated
+            if sampler is not None:
+                sampled = sampler.sample(env, global_state_index)
+                state = sampled.state
+                observation = sampled.observation
+                episode_id = sampled.episode_id
+                scenario_id = sampled.scenario_id
+                split = sampled.split
+                state_category = sampled.category
+                sampling_seed = sampled.sampling_seed
+                state_id = f"{effective_run_id}:state-{global_state_index:08d}"
+            else:
+                if env.state.slot >= system_config.system.episode_slots:
+                    episode_id += 1
+                    observation, _ = env.reset(seed=master_seed + episode_id)
+                state = env.state.clone()
+                scenario_id = f"scenario-{master_seed + episode_id}"
+                state_id = f"{effective_run_id}:episode-{episode_id:06d}:slot-{state.slot:05d}"
+                split = assign_split(scenario_id, master_seed)
+                state_category = "ordinary"
+                sampling_seed = master_seed + episode_id
             prompt = build_teacher_prompt(
                 system_config,
                 observation,
@@ -740,6 +878,9 @@ def generate_demonstrations(
                     },
                     state_metrics=_state_metrics(state),
                     verifier_only=_verifier_only(state),
+                    global_state_index=global_state_index,
+                    state_category=state_category,
+                    sampling_seed=sampling_seed,
                 ),
             )
             request = TeacherRequest(
@@ -789,9 +930,18 @@ def generate_demonstrations(
                         oracle_regret=None,
                         acceptance_status="rejected",
                         acceptance_reason=parse_error or "teacher request failed",
+                        decision_status="unresolved",
+                        practical_equivalence_margin=(
+                            teacher_config.verification.practical_equivalence_margin
+                        ),
+                        equivalent_candidate_indices=(),
+                        verification_rollouts=0,
+                        adaptive_rounds=0,
                     ),
                 )
-                observation, _, _, truncated, _ = env.step(greedy.act(observation))
+                truncated = False
+                if sampler is None:
+                    observation, _, _, truncated, _ = env.step(greedy.act(observation))
             else:
                 _log_valid_request(
                     writer,
@@ -815,9 +965,11 @@ def generate_demonstrations(
                     teacher_config,
                     master_seed,
                 )
-                observation, _, _, truncated, _ = env.step(selected.action)
+                truncated = False
+                if sampler is None:
+                    observation, _, _, truncated, _ = env.step(selected.action)
             generated += 1
-            if truncated:
+            if sampler is None and truncated:
                 episode_id += 1
                 observation, _ = env.reset(seed=master_seed + episode_id)
         return writer.finalize(

@@ -22,6 +22,92 @@ TABLES = (
 )
 
 
+def _read_valid_json_objects(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                break
+            if not isinstance(value, dict):
+                break
+            records.append(value)
+    return records
+
+
+def prepare_resume_directory(
+    directory: str | Path,
+    expected_candidates: int,
+    shortlist_size: int,
+) -> int:
+    """Trim an interrupted shard to its last complete per-state transaction."""
+
+    root = Path(directory)
+    if not (root / "manifest.json").exists():
+        return 0
+    tables = {table: _read_valid_json_objects(root / f"{table}.jsonl") for table in TABLES}
+    requests = {str(record["state_id"]): record for record in tables["teacher_requests"]}
+    selections = {str(record["state_id"]): record for record in tables["selections"]}
+    demonstration_ids = {str(record["state_id"]) for record in tables["demonstrations"]}
+    candidate_counts: dict[str, int] = {}
+    rollout_counts: dict[str, int] = {}
+    for record in tables["candidates"]:
+        state_id = str(record["state_id"])
+        candidate_counts[state_id] = candidate_counts.get(state_id, 0) + 1
+    for record in tables["rollouts"]:
+        state_id = str(record["state_id"])
+        rollout_counts[state_id] = rollout_counts.get(state_id, 0) + 1
+
+    complete_ids: list[str] = []
+    for state in tables["states"]:
+        state_id = str(state["state_id"])
+        request = requests.get(state_id)
+        selection = selections.get(state_id)
+        if request is None or selection is None:
+            break
+        if selection.get("acceptance_status") == "accepted":
+            verification_rollouts = int(selection.get("verification_rollouts", 0))
+            expected_rollouts = (shortlist_size + 2) * verification_rollouts
+            complete = (
+                state_id in demonstration_ids
+                and candidate_counts.get(state_id, 0) == expected_candidates
+                and verification_rollouts > 0
+                and rollout_counts.get(state_id, 0) == expected_rollouts
+            )
+        else:
+            complete = candidate_counts.get(state_id, 0) == 0 and state_id not in demonstration_ids
+        if not complete:
+            break
+        complete_ids.append(state_id)
+
+    keep = set(complete_ids)
+    for table, records in tables.items():
+        destination = root / f"{table}.jsonl"
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{table}.resume.", suffix=".tmp", dir=root, text=True
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            for record in records:
+                if str(record.get("state_id", "")) in keep:
+                    stream.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, destination)
+    for stale in (
+        *root.glob("*.parquet"),
+        root / "audit.json",
+        root / "teacher_quality_report.json",
+    ):
+        if stale.exists():
+            stale.unlink()
+    return len(complete_ids)
+
+
 class DatasetWriter:
     """Append-only JSONL is canonical; Parquet is an optional plotting export."""
 
@@ -55,6 +141,25 @@ class DatasetWriter:
             existing = json.load(stream)
         if existing.get("run_id") != self.manifest.run_id:
             raise ValueError("resume run_id does not match the existing dataset")
+        if existing.get("configuration_hash") != self.manifest.configuration_hash:
+            raise ValueError("resume configuration does not match the existing dataset")
+        expected_provenance = {
+            "global_state_start": self.manifest.global_state_start,
+            "global_state_stop": self.manifest.global_state_stop,
+            "total_requested_states": self.manifest.total_requested_states,
+            "shard_index": self.manifest.shard_index,
+            "shard_count": self.manifest.shard_count,
+            "master_seed": self.manifest.master_seed,
+        }
+        if any(
+            existing.get(key, 0 if key == "global_state_start" else None) != value
+            for key, value in expected_provenance.items()
+        ):
+            raise ValueError("resume global state range does not match the existing dataset")
+        self.manifest = replace(
+            self.manifest,
+            created_at=str(existing.get("created_at", self.manifest.created_at)),
+        )
         for table in TABLES:
             path = self.directory / f"{table}.jsonl"
             if path.exists():

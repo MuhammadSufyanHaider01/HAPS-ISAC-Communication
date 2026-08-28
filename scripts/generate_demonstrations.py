@@ -10,6 +10,7 @@ from typing import Any
 from haps_isac.config import load_config
 from haps_isac.data.demonstration_schema import json_safe
 from haps_isac.data.generation import generate_demonstrations
+from haps_isac.data.state_sampler import shard_bounds
 from haps_isac.teachers.base_teacher import load_teacher_config
 
 
@@ -27,8 +28,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url")
     parser.add_argument("--candidates", type=int)
     parser.add_argument("--rollouts", type=int)
+    parser.add_argument("--max-rollouts", type=int)
+    parser.add_argument("--rollout-batch-size", type=int)
+    parser.add_argument("--equivalence-margin", type=float)
     parser.add_argument("--horizon", type=int)
     parser.add_argument("--shortlist", type=int)
+    parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--flush-every", type=int)
     parser.add_argument("--no-parquet", action="store_true")
     return parser
@@ -57,9 +64,15 @@ def main() -> None:
     arguments = build_parser().parse_args()
     system = load_config(arguments.system_config)
     teacher = load_teacher_config(arguments.teacher_config)
-    verification_updates: dict[str, int] = {}
+    verification_updates: dict[str, Any] = {}
     if arguments.rollouts is not None:
         verification_updates["monte_carlo_rollouts"] = arguments.rollouts
+    if arguments.max_rollouts is not None:
+        verification_updates["max_monte_carlo_rollouts"] = arguments.max_rollouts
+    if arguments.rollout_batch_size is not None:
+        verification_updates["rollout_batch_size"] = arguments.rollout_batch_size
+    if arguments.equivalence_margin is not None:
+        verification_updates["practical_equivalence_margin"] = arguments.equivalence_margin
     if arguments.horizon is not None:
         verification_updates["rollout_horizon_slots"] = arguments.horizon
     if arguments.shortlist is not None:
@@ -78,16 +91,24 @@ def main() -> None:
     if teacher.verification.shortlist_size > teacher.num_candidates:
         raise ValueError("shortlist cannot exceed the number of candidates")
     master_seed = system.master_seed if arguments.seed is None else arguments.seed
+    global_start, global_stop = shard_bounds(
+        arguments.states, arguments.shard_index, arguments.shard_count
+    )
     manifest = generate_demonstrations(
         system_config=system,
         teacher_config=teacher,
         system_config_path=arguments.system_config,
         teacher_config_path=arguments.teacher_config,
         output_directory=Path(arguments.output),
-        requested_states=arguments.states,
+        requested_states=global_stop - global_start,
         master_seed=master_seed,
         run_id=arguments.run_id,
         export_parquet=False if arguments.no_parquet else None,
+        total_states=arguments.states,
+        global_state_start=global_start,
+        shard_index=arguments.shard_index,
+        shard_count=arguments.shard_count,
+        resume=arguments.resume,
     )
     print(json.dumps(json_safe(manifest), indent=2, sort_keys=True))
 

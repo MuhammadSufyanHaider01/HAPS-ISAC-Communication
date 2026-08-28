@@ -3,20 +3,30 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from haps_isac.config import load_config
+from haps_isac.control.virtual_queues import queue_slices
 from haps_isac.data import generation as generation_module
 from haps_isac.data.audit import audit_dataset
 from haps_isac.data.dataset_loader import DatasetLoader
 from haps_isac.data.generation import generate_demonstrations
+from haps_isac.data.merge import merge_shards
 from haps_isac.data.quality_report import build_teacher_quality_report
 from haps_isac.data.split_manager import DEFAULT_SPLIT_FRACTIONS
+from haps_isac.data.state_sampler import StratifiedStateSampler, exact_assignments, shard_bounds
 from haps_isac.envs.haps_isac_env import HapsIsacEnv
-from haps_isac.teachers.base_teacher import MockTeacher, TeacherRequest, load_teacher_config
+from haps_isac.teachers.base_teacher import (
+    MockTeacher,
+    TeacherConfig,
+    TeacherRequest,
+    load_teacher_config,
+)
 from haps_isac.teachers.benchmark import run_tournament
 from haps_isac.teachers.prompt_builder import build_teacher_prompt
 from haps_isac.teachers.query_cache import QueryCache, cache_key_for
@@ -56,6 +66,31 @@ def _mock_response(state_id: str, count: int, pairs: int) -> str:
         for index in range(count)
     ]
     return json.dumps({"schema_version": 1, "state_id": state_id, "candidates": candidates})
+
+
+def _fast_mock_teacher() -> TeacherConfig:
+    base = load_teacher_config("configs/teacher.yaml")
+    return base.model_copy(
+        update={
+            "provider": "mock",
+            "model_id": "mock/test",
+            "model_revision": "deterministic-v1",
+            "num_candidates": 4,
+            "cache_enabled": False,
+            "verification": base.verification.model_copy(
+                update={
+                    "monte_carlo_rollouts": 1,
+                    "max_monte_carlo_rollouts": 1,
+                    "rollout_batch_size": 1,
+                    "rollout_horizon_slots": 1,
+                    "shortlist_size": 2,
+                    "uncertainty_bootstrap_samples": 50,
+                }
+            ),
+            "dataset": base.dataset.model_copy(update={"maximum_rollin_slots": 0}),
+            "logging": base.logging.model_copy(update={"export_parquet": False, "flush_every": 1}),
+        }
+    )
 
 
 def test_default_dataset_split_matches_plan() -> None:
@@ -258,6 +293,11 @@ def test_common_random_rollouts_are_reproducible() -> None:
     assert env.state.slot == 0
     selection = select_candidate(one_steps, summaries, settings)
     assert selection.selected_candidate_index in (0, 1)
+    assert selection.decision_status in {
+        "decisive",
+        "practically_equivalent",
+        "unresolved",
+    }
     assert np.isclose(
         sum(item.quality_weight for item in selection.rankings),
         1.0,
@@ -298,6 +338,8 @@ def test_common_random_rollouts_are_reproducible() -> None:
     )
     assert paired_selection.margin_confidence_lower > 0.0
     assert not paired_selection.selection_uncertain
+    assert paired_selection.decision_status == "practically_equivalent"
+    assert paired_selection.equivalent_candidate_indices == (0, 1)
 
 
 def test_mock_generation_writes_loadable_linked_tables(tmp_path: pytest.TempPathFactory) -> None:
@@ -314,6 +356,7 @@ def test_mock_generation_writes_loadable_linked_tables(tmp_path: pytest.TempPath
                 update={
                     "monte_carlo_rollouts": 2,
                     "rollout_horizon_slots": 2,
+                    "max_monte_carlo_rollouts": 2,
                     "shortlist_size": 2,
                     "uncertainty_bootstrap_samples": 100,
                 }
@@ -343,15 +386,20 @@ def test_mock_generation_writes_loadable_linked_tables(tmp_path: pytest.TempPath
     for table_name in manifest.table_counts:
         first_line = (output / f"{table_name}.jsonl").read_text(encoding="utf-8").splitlines()[0]
         record = json.loads(first_line)
-        assert record["schema_version"] == 3
+        assert record["schema_version"] == 4
         assert record["logged_at"].endswith("+00:00")
     assert "torch" in manifest.software["packages"]
     loader = DatasetLoader(output)
     demonstrations = loader.demonstrations()
     assert len(demonstrations) == 2
-    batch = next(loader.batches(2, split=demonstrations[0]["split"]))
-    assert batch.pair_tokens.shape == (2, 4, 14)
-    assert batch.continuous_action.shape == (2, 7)
+    selected_split = demonstrations[0]["split"]
+    split_count = sum(record["split"] == selected_split for record in demonstrations)
+    batch = next(loader.batches(2, split=selected_split))
+    assert batch.pair_tokens.shape == (split_count, 4, 14)
+    assert batch.continuous_action.shape == (split_count, 7)
+    assert batch.target_pair.shape[0] == split_count
+    assert np.allclose(np.sum(batch.target_weight, axis=1), 1.0)
+    assert np.all(batch.target_mask[:, 0] == 1)
     audit = audit_dataset(str(output))
     assert audit.passed
     assert audit.metrics["candidate_post_repair_hard_feasible_rate"] == 1.0
@@ -361,6 +409,8 @@ def test_mock_generation_writes_loadable_linked_tables(tmp_path: pytest.TempPath
     assert "eta_communication" in quality["action_field_changes"]
     assert quality["baseline_comparison"]["verified_compared_states"] == 2
     assert quality["scale_up_gates"]["request_schema_valid_rate"]["passed"]
+
+    assert quality["distillation_targets"]["valid_rate"] == 1.0
 
 
 def test_tournament_uses_a_common_frozen_state_bank() -> None:
@@ -414,3 +464,150 @@ def test_audit_reports_missing_tables_without_crashing(
     assert not audit.passed
     assert "missing canonical table: candidates.jsonl" in audit.errors
     assert audit.counts["candidates"] == 0
+
+
+def test_stratified_plan_has_exact_5000_state_quotas_and_deterministic_stress() -> None:
+    system = load_config("configs/system_v1.yaml")
+    teacher = _fast_mock_teacher()
+    state_fractions = teacher.dataset.state_fractions.model_dump()
+    split_fractions = teacher.dataset.split_fractions.model_dump()
+
+    assert Counter(exact_assignments(5000, state_fractions, 123, "state-category")) == {
+        "ordinary": 1750,
+        "freshness_stress": 1250,
+        "sensing_stress": 750,
+        "secrecy_stress": 750,
+        "boundary_rare": 500,
+    }
+    assert Counter(exact_assignments(5000, split_fractions, 123, "scenario-split")) == {
+        "train": 3500,
+        "validation": 750,
+        "test": 750,
+    }
+    bounds = [shard_bounds(5000, index, 10) for index in range(10)]
+    assert bounds[0] == (0, 500)
+    assert bounds[-1] == (4500, 5000)
+    assert all(stop - start == 500 for start, stop in bounds)
+
+    sampler = StratifiedStateSampler(system, teacher.dataset, 20, 123)
+    env = HapsIsacEnv(system)
+    first_by_category = {}
+    for index in range(20):
+        sampled = sampler.sample(env, index)
+        assert np.all(np.isfinite(sampled.observation["global_features"]))
+        first_by_category.setdefault(sampled.category, sampled)
+    assert set(first_by_category) == {
+        "ordinary",
+        "freshness_stress",
+        "sensing_stress",
+        "secrecy_stress",
+        "boundary_rare",
+    }
+    freshness = first_by_category["freshness_stress"].state
+    sensing = first_by_category["sensing_stress"].state
+    secrecy = first_by_category["secrecy_stress"].state
+    boundary = first_by_category["boundary_rare"].state
+    layout = queue_slices(system.system.num_noma_pairs)
+    assert float(np.min(freshness.aoi)) >= 0.70 * system.freshness.aoi_cap_slots
+    assert np.isclose(
+        np.trace(sensing.available_covariance),
+        0.90 * system.constraints.maximum_covariance_trace,
+    )
+    assert float(np.min(secrecy.virtual_queues[layout.secrecy])) >= (
+        0.75 * system.constraints.queue_reference
+    )
+    assert float(np.min(boundary.virtual_queues)) >= 0.95 * system.constraints.queue_reference
+
+    repeated = StratifiedStateSampler(system, teacher.dataset, 20, 123).sample(
+        HapsIsacEnv(system), first_by_category["boundary_rare"].global_state_index
+    )
+    np.testing.assert_allclose(repeated.state.aoi, boundary.aoi)
+    np.testing.assert_allclose(repeated.state.virtual_queues, boundary.virtual_queues)
+
+
+def test_generation_resume_trims_and_regenerates_incomplete_state(tmp_path: Path) -> None:
+    output = tmp_path / "resume-dataset"
+    system = load_config("configs/system_v1.yaml")
+    teacher = _fast_mock_teacher()
+    first = generate_demonstrations(
+        system,
+        teacher,
+        "configs/system_v1.yaml",
+        "configs/teacher.yaml",
+        output,
+        requested_states=3,
+        master_seed=77,
+        run_id="resume-test",
+        export_parquet=False,
+    )
+    demonstration_path = output / "demonstrations.jsonl"
+    lines = demonstration_path.read_text(encoding="utf-8").splitlines()
+    demonstration_path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+
+    resumed = generate_demonstrations(
+        system,
+        teacher,
+        "configs/system_v1.yaml",
+        "configs/teacher.yaml",
+        output,
+        requested_states=3,
+        master_seed=77,
+        run_id="resume-test",
+        export_parquet=False,
+        resume=True,
+    )
+    assert resumed.created_at == first.created_at
+    assert resumed.table_counts == {
+        "states": 3,
+        "teacher_requests": 3,
+        "candidates": 12,
+        "rollouts": 12,
+        "selections": 3,
+        "demonstrations": 3,
+    }
+    assert audit_dataset(str(output)).passed
+
+
+def test_complete_shards_merge_in_global_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HAPS_GIT_COMMIT", "b" * 40)
+    monkeypatch.setenv("HAPS_GIT_DIRTY", "0")
+    root = tmp_path / "sharded"
+    system = load_config("configs/system_v1.yaml")
+    teacher = _fast_mock_teacher()
+    shard_directories = []
+    for shard_index in range(2):
+        start, stop = shard_bounds(4, shard_index, 2)
+        directory = root / "shards" / f"shard-{shard_index:03d}"
+        generate_demonstrations(
+            system,
+            teacher,
+            "configs/system_v1.yaml",
+            "configs/teacher.yaml",
+            directory,
+            requested_states=stop - start,
+            master_seed=55,
+            run_id=f"merge-test-shard-{shard_index:03d}",
+            export_parquet=False,
+            total_states=4,
+            global_state_start=start,
+            shard_index=shard_index,
+            shard_count=2,
+        )
+        shard_directories.append(directory)
+
+    output = root / "merged"
+    manifest = merge_shards(
+        tuple(reversed(shard_directories)),
+        output,
+        "merge-test",
+        expected_shards=2,
+        export_parquet=False,
+    )
+    assert manifest.table_counts["states"] == 4
+    states = list(DatasetLoader(output).iter_table("states"))
+    assert [record["global_state_index"] for record in states] == [0, 1, 2, 3]
+    assert {record["run_id"] for record in states} == {"merge-test"}
+    assert audit_dataset(str(output)).passed

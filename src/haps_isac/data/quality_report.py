@@ -32,7 +32,11 @@ SCALE_UP_THRESHOLDS = {
     "candidate_p95_repair_distance": ("<=", 0.25),
     "selected_fallback_rate": ("<=", 0.0),
     "selected_p95_repair_distance": ("<=", 0.05),
-    "selection_uncertain_rate": ("<=", 0.05),
+    "selection_unresolved_rate": ("<=", 0.05),
+    "distillation_target_valid_rate": (">=", 1.0),
+    "duplicate_causal_state_rate": ("<=", 0.0),
+    "state_distribution_max_abs_error": ("<=", 0.02),
+    "split_distribution_max_abs_error": ("<=", 0.02),
     "demonstration_acceptance_rate": (">=", 0.99),
     "selected_vs_greedy_verified_win_rate": (">=", 0.55),
     "selected_vs_random_verified_win_rate": (">=", 0.55),
@@ -51,6 +55,63 @@ def _quantile(values: list[float], probability: float) -> float:
 
 def _rate(records: list[dict[str, Any]], key: str) -> float:
     return _mean([float(bool(record[key])) for record in records])
+
+
+def _decision_status(record: dict[str, Any]) -> str:
+    value = record.get("decision_status")
+    if value in {"decisive", "practically_equivalent", "unresolved"}:
+        return str(value)
+    return "unresolved" if bool(record.get("selection_uncertain", True)) else "decisive"
+
+
+def _target_is_valid(record: dict[str, Any]) -> bool:
+    targets = record.get("target_candidates")
+    if targets is None:
+        return "selected_action" in record
+    if not isinstance(targets, list) or not targets:
+        return False
+    if any(not isinstance(target, dict) for target in targets):
+        return False
+    try:
+        weights = [float(target.get("weight", -1.0)) for target in targets]
+        candidate_indices = [int(target.get("candidate_index", -1)) for target in targets]
+    except (TypeError, ValueError):
+        return False
+    return (
+        all(np.isfinite(weight) and weight >= 0.0 for weight in weights)
+        and abs(sum(weights) - 1.0) <= 1e-6
+        and len(candidate_indices) == len(set(candidate_indices))
+        and all(isinstance(target.get("action"), dict) for target in targets)
+    )
+
+
+def _distribution_summary(
+    records: list[dict[str, Any]],
+    field: str,
+    target: dict[str, Any],
+) -> dict[str, Any]:
+    counts = Counter(str(record.get(field, "unknown")) for record in records)
+    denominator = max(1, len(records))
+    labels = sorted(set(counts) | set(target))
+    rows = {
+        label: {
+            "count": counts.get(label, 0),
+            "actual_fraction": counts.get(label, 0) / denominator,
+            "target_fraction": float(target.get(label, 0.0)),
+            "absolute_error": abs(
+                counts.get(label, 0) / denominator - float(target.get(label, 0.0))
+            ),
+        }
+        for label in labels
+    }
+    return {
+        "records": len(records),
+        "categories": rows,
+        "max_absolute_error": max(
+            (float(row["absolute_error"]) for row in rows.values()),
+            default=0.0,
+        ),
+    }
 
 
 def _candidate_summary(records: list[dict[str, Any]]) -> dict[str, float | int]:
@@ -246,6 +307,8 @@ def _state_difficulty_rows(
             "state_id": state_id,
             "scenario_id": str(state["scenario_id"]),
             "split": str(state["split"]),
+            "global_state_index": state.get("global_state_index"),
+            "state_category": state.get("state_category", "ordinary"),
             "slot": int(state["slot"]),
             "mean_aoi": float(metrics["mean_aoi"]),
             "max_aoi": float(metrics["max_aoi"]),
@@ -268,6 +331,9 @@ def _state_difficulty_rows(
                 float(selected_rollout["risk_score"]) if "risk_score" in selected_rollout else None
             ),
             "selection_uncertain": selection.get("selection_uncertain"),
+            "decision_status": _decision_status(selection),
+            "verification_rollouts": selection.get("verification_rollouts"),
+            "adaptive_rounds": selection.get("adaptive_rounds"),
             "selection_probability": selection.get("selection_probability"),
             "margin_confidence_lower": selection.get("margin_confidence_lower"),
             "margin_confidence_upper": selection.get("margin_confidence_upper"),
@@ -315,6 +381,28 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
         selection for selection in selections if selection["acceptance_status"] == "accepted"
     ]
     selection_uncertain_rate = _rate(accepted_selections, "selection_uncertain")
+    decision_counts = Counter(_decision_status(record) for record in accepted_selections)
+    selection_unresolved_rate = (
+        decision_counts["unresolved"] / len(accepted_selections) if accepted_selections else 0.0
+    )
+    target_valid_rate = _mean([float(_target_is_valid(record)) for record in demonstrations])
+    causal_hash_counts = Counter(str(record["causal_state_hash"]) for record in states)
+    duplicate_state_count = sum(count - 1 for count in causal_hash_counts.values() if count > 1)
+    duplicate_causal_state_rate = duplicate_state_count / len(states) if states else 0.0
+    state_distribution = _distribution_summary(
+        states,
+        "state_category",
+        dict(loader.manifest.get("state_distribution", {})),
+    )
+    split_distribution = _distribution_summary(
+        states,
+        "split",
+        dict(loader.manifest.get("split_fractions", {})),
+    )
+    verification_rollouts = [
+        float(record.get("verification_rollouts", 0)) for record in accepted_selections
+    ]
+    adaptive_rounds = [float(record.get("adaptive_rounds", 0)) for record in accepted_selections]
     baseline_comparison = _baseline_comparison(candidates, selections)
     metrics = {
         "request_schema_valid_rate": request_schema_valid_rate,
@@ -329,6 +417,11 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
         "selected_fallback_rate": selected_summary["fallback_rate"],
         "selected_p95_repair_distance": selected_summary["p95_repair_distance"],
         "selection_uncertain_rate": selection_uncertain_rate,
+        "selection_unresolved_rate": selection_unresolved_rate,
+        "distillation_target_valid_rate": target_valid_rate,
+        "duplicate_causal_state_rate": duplicate_causal_state_rate,
+        "state_distribution_max_abs_error": state_distribution["max_absolute_error"],
+        "split_distribution_max_abs_error": split_distribution["max_absolute_error"],
         "demonstration_acceptance_rate": (len(demonstrations) / len(states) if states else 0.0),
         "selected_vs_greedy_verified_win_rate": baseline_comparison[
             "selected_vs_greedy_verified_win_rate"
@@ -380,6 +473,32 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
         "selection_quality": {
             "accepted_count": len(accepted_selections),
             "uncertain_rate": selection_uncertain_rate,
+            "decision_counts": dict(sorted(decision_counts.items())),
+            "unresolved_rate": selection_unresolved_rate,
+            "practically_equivalent_rate": (
+                decision_counts["practically_equivalent"] / len(accepted_selections)
+                if accepted_selections
+                else 0.0
+            ),
+            "mean_verification_rollouts": _mean(verification_rollouts),
+            "p95_verification_rollouts": _quantile(verification_rollouts, 0.95),
+            "max_verification_rollouts": max(verification_rollouts, default=0.0),
+            "mean_adaptive_rounds": _mean(adaptive_rounds),
+        },
+        "distillation_targets": {
+            "valid_rate": target_valid_rate,
+            "mean_candidates_per_state": _mean(
+                [float(len(record.get("target_candidates") or [None])) for record in demonstrations]
+            ),
+            "mean_entropy": _mean(
+                [float(record.get("target_entropy", 0.0)) for record in demonstrations]
+            ),
+        },
+        "sampling_quality": {
+            "duplicate_causal_state_count": duplicate_state_count,
+            "duplicate_causal_state_rate": duplicate_causal_state_rate,
+            "state_distribution": state_distribution,
+            "split_distribution": split_distribution,
         },
         "repair_reasons": {
             reason: {

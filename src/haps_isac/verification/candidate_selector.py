@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -34,6 +35,9 @@ class SelectionResult:
     margin_confidence_lower: float
     margin_confidence_upper: float
     selection_probability: float
+    decision_status: Literal["decisive", "practically_equivalent", "unresolved"]
+    equivalent_candidate_indices: tuple[int, ...]
+    verification_rollouts: int
 
 
 def _paired_risk_bootstrap(
@@ -106,6 +110,13 @@ def select_candidate(
     weights = np.exp(np.clip(logits, -700.0, 0.0))
     weights /= float(np.sum(weights))
 
+    best_score = float(ordered[0].risk_score)
+    equivalent_candidate_indices = tuple(
+        item.candidate_index
+        for item in ordered
+        if float(item.risk_score) - best_score <= settings.practical_equivalence_margin + 1e-12
+    )
+
     if len(ordered) == 1:
         margin = math.inf
         standardized = math.inf
@@ -113,6 +124,7 @@ def select_candidate(
         confidence_upper = math.inf
         selection_probability = 1.0
         uncertain = False
+        decision_status: Literal["decisive", "practically_equivalent", "unresolved"] = "decisive"
     else:
         margin = ordered[1].risk_score - ordered[0].risk_score
         (
@@ -125,6 +137,12 @@ def select_candidate(
             margin / bootstrap_standard_error if bootstrap_standard_error > 0.0 else math.inf
         )
         uncertain = confidence_lower <= 0.0
+        if len(equivalent_candidate_indices) > 1:
+            decision_status = "practically_equivalent"
+        elif not uncertain:
+            decision_status = "decisive"
+        else:
+            decision_status = "unresolved"
 
     rankings = tuple(
         CandidateRanking(
@@ -144,4 +162,7 @@ def select_candidate(
         margin_confidence_lower=float(confidence_lower),
         margin_confidence_upper=float(confidence_upper),
         selection_probability=selection_probability,
+        decision_status=decision_status,
+        equivalent_candidate_indices=equivalent_candidate_indices,
+        verification_rollouts=min(item.rollout_count for item in ordered),
     )
