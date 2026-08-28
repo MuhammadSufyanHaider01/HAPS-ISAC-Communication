@@ -113,6 +113,7 @@ def _merged_manifest(
         sampling_strategy=str(first.get("sampling_strategy", "sequential")),
         state_distribution=dict(first.get("state_distribution", {})),
         split_fractions=dict(first.get("split_fractions", {})),
+        candidate_pool_config=dict(first.get("candidate_pool_config", {})),
     )
 
 

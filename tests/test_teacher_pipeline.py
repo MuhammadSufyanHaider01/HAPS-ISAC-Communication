@@ -114,7 +114,10 @@ def test_prompt_is_deterministic_and_causal() -> None:
     assert "target_true_state" not in first.prompt
     assert "haps_ue_true" not in first.prompt
     assert "every candidate MUST set the exact values ris_code=0" in first.prompt
-    assert "satisfy sensing_power_w=eta_haps*(1-eta_communication)" in first.prompt
+    assert "optimization_contract" in first.prompt
+    assert "near_aoi_fraction" in first.prompt
+    assert "virtual_queue_transform" in first.prompt
+    assert "target_true_state" not in first.semantic_state_packet
     assert set(first.causal_payload) == {
         "pair_tokens",
         "pair_mask",
@@ -375,18 +378,41 @@ def test_mock_generation_writes_loadable_linked_tables(tmp_path: pytest.TempPath
         run_id="test-run",
         export_parquet=False,
     )
-    assert manifest.table_counts == {
-        "states": 2,
-        "teacher_requests": 2,
-        "candidates": 8,
-        "rollouts": 16,
-        "selections": 2,
-        "demonstrations": 2,
-    }
+    assert manifest.table_counts["states"] == 2
+    assert manifest.table_counts["teacher_requests"] == 2
+    assert manifest.table_counts["selections"] == 2
+    assert manifest.table_counts["demonstrations"] == 2
+    candidates = [
+        json.loads(line) for line in (output / "candidates.jsonl").read_text().splitlines()
+    ]
+    selections = [
+        json.loads(line) for line in (output / "selections.jsonl").read_text().splitlines()
+    ]
+    assert sum(record["candidate_source"] == "teacher" for record in candidates) == 8
+    assert sum(record["candidate_source"] == "greedy_baseline" for record in candidates) == 2
+    assert all(record["safe_template_coverage_rate"] == 1.0 for record in selections)
+    assert all(record["greedy_candidate_index"] is not None for record in selections)
+    assert manifest.table_counts["candidates"] == sum(
+        record["candidate_pool_count"] for record in selections
+    )
+    assert manifest.table_counts["rollouts"] == sum(
+        (record["verified_candidate_count"] + record["external_baseline_rollout_count"])
+        * record["verification_rollouts"]
+        for record in selections
+    )
+    selected_by_state = {record["state_id"]: record for record in candidates if record["selected"]}
+    for selection in selections:
+        selected = selected_by_state[selection["state_id"]]
+        assert selected["rollout_summary"]["risk_score"] <= (
+            selection["baseline_scores"]["greedy_verified_risk_score"] + 1e-12
+        )
+        assert selection["oracle_diagnostic"]["reference"] == (
+            "reduced_grid_one_step_stage_cost_not_global_optimum"
+        )
     for table_name in manifest.table_counts:
         first_line = (output / f"{table_name}.jsonl").read_text(encoding="utf-8").splitlines()[0]
         record = json.loads(first_line)
-        assert record["schema_version"] == 4
+        assert record["schema_version"] == 5
         assert record["logged_at"].endswith("+00:00")
     assert "torch" in manifest.software["packages"]
     loader = DatasetLoader(output)
@@ -409,6 +435,8 @@ def test_mock_generation_writes_loadable_linked_tables(tmp_path: pytest.TempPath
     assert "eta_communication" in quality["action_field_changes"]
     assert quality["baseline_comparison"]["verified_compared_states"] == 2
     assert quality["scale_up_gates"]["request_schema_valid_rate"]["passed"]
+    assert quality["selection_quality"]["safe_template_coverage_rate"] == 1.0
+    assert quality["baseline_comparison"]["selected_no_worse_than_greedy_verified_rate"] == 1.0
 
     assert quality["distillation_targets"]["valid_rate"] == 1.0
 
@@ -557,14 +585,21 @@ def test_generation_resume_trims_and_regenerates_incomplete_state(tmp_path: Path
         resume=True,
     )
     assert resumed.created_at == first.created_at
-    assert resumed.table_counts == {
-        "states": 3,
-        "teacher_requests": 3,
-        "candidates": 12,
-        "rollouts": 12,
-        "selections": 3,
-        "demonstrations": 3,
-    }
+    assert resumed.table_counts["states"] == 3
+    assert resumed.table_counts["teacher_requests"] == 3
+    assert resumed.table_counts["selections"] == 3
+    assert resumed.table_counts["demonstrations"] == 3
+    selections = [
+        json.loads(line) for line in (output / "selections.jsonl").read_text().splitlines()
+    ]
+    assert resumed.table_counts["candidates"] == sum(
+        record["candidate_pool_count"] for record in selections
+    )
+    assert resumed.table_counts["rollouts"] == sum(
+        (record["verified_candidate_count"] + record["external_baseline_rollout_count"])
+        * record["verification_rollouts"]
+        for record in selections
+    )
     assert audit_dataset(str(output)).passed
 
 

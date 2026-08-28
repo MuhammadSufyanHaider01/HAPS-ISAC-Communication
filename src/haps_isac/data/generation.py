@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 
 from haps_isac.baselines.greedy_policy import GreedyPolicy
+from haps_isac.baselines.optimization_policy import one_step_grid_oracle
 from haps_isac.baselines.random_policy import RandomPolicy
 from haps_isac.config import ExperimentConfig
 from haps_isac.control.action_transform import action_from_mapping
@@ -44,8 +45,13 @@ from haps_isac.teachers.base_teacher import (
     TeacherRequest,
     VerificationConfig,
 )
+from haps_isac.teachers.candidate_pool import (
+    build_candidate_pool,
+    canonical_action_key,
+    template_compliance,
+)
 from haps_isac.teachers.gemma_teacher import GemmaTeacher
-from haps_isac.teachers.prompt_builder import build_teacher_prompt
+from haps_isac.teachers.prompt_builder import PromptArtifact, build_teacher_prompt
 from haps_isac.teachers.query_cache import QueryCache
 from haps_isac.teachers.qwen_teacher import QwenTeacher
 from haps_isac.teachers.response_parser import (
@@ -232,6 +238,7 @@ def build_manifest(
         sampling_strategy=teacher_config.dataset.strategy,
         state_distribution=teacher_config.dataset.state_fractions.model_dump(),
         split_fractions=teacher_config.dataset.split_fractions.model_dump(),
+        candidate_pool_config=teacher_config.candidate_pool.model_dump(mode="json"),
     )
 
 
@@ -296,7 +303,7 @@ def _without(value: Any, excluded: set[str]) -> dict[str, Any]:
     }
 
 
-def _baseline_scores(
+def _random_baseline(
     env: HapsIsacEnv,
     state: SimulatorState,
     observation: dict[str, np.ndarray],
@@ -304,65 +311,51 @@ def _baseline_scores(
     master_seed: int,
     settings: VerificationConfig,
     rollout_count: int,
-) -> tuple[
-    dict[str, float],
-    tuple[tuple[str, CandidateRolloutSummary], ...],
-]:
-    seed = _stable_seed(master_seed, f"{state_id}:baseline")
-    greedy_mapping = GreedyPolicy(env.config.system.num_noma_pairs).act(observation)
+    rollout_seed: int,
+) -> tuple[ParsedCandidate, Any, CandidateRolloutSummary]:
+    """Evaluate random only as a non-selectable comparison baseline."""
+
     random_mapping = RandomPolicy(
         env.config.system.num_noma_pairs,
         _stable_seed(master_seed, f"{state_id}:random-policy"),
     ).act(observation)
-    baseline_candidates = (
-        ParsedCandidate(
-            candidate_index=-1,
-            action=action_from_mapping(greedy_mapping),
-            reason_codes=("greedy_baseline",),
-            confidence=1.0,
-            canonical_key=(-1,),
-        ),
-        ParsedCandidate(
-            candidate_index=-2,
-            action=action_from_mapping(random_mapping),
-            reason_codes=("random_baseline",),
-            confidence=1.0,
-            canonical_key=(-2,),
-        ),
+    action = action_from_mapping(random_mapping)
+    candidate = ParsedCandidate(
+        candidate_index=-1,
+        action=action,
+        reason_codes=("random_baseline",),
+        confidence=0.0,
+        canonical_key=canonical_action_key(action),
+        source="random_baseline",
+        source_label="seeded_random",
     )
-    one_steps = tuple(
-        evaluate_one_step(env, state, candidate, seed) for candidate in baseline_candidates
+    evaluation = evaluate_one_step(env, state, candidate, rollout_seed)
+    summary = verify_candidate(
+        env,
+        state,
+        state_id,
+        candidate,
+        master_seed,
+        settings,
+        retain_trajectories=False,
+        rollout_count=rollout_count,
     )
-    summaries = tuple(
-        verify_candidate(
-            env,
-            state,
-            state_id,
-            candidate,
-            master_seed,
-            settings,
-            retain_trajectories=False,
-            rollout_count=rollout_count,
-        )
-        for candidate in baseline_candidates
-    )
-    scores: dict[str, float] = {}
-    labeled_summaries: list[tuple[str, CandidateRolloutSummary]] = []
-    for label, one_step, summary in zip(
-        ("greedy", "random"),
-        one_steps,
-        summaries,
-        strict=True,
-    ):
-        scores[f"{label}_one_step_cost"] = one_step.stage_cost
-        scores[f"{label}_verified_risk_score"] = summary.risk_score
-        scores[f"{label}_verified_mean_cost"] = summary.mean_cost
-        scores[f"{label}_verified_cvar_cost"] = summary.cvar_cost
-        scores[f"{label}_verified_constraint_violation"] = summary.mean_constraint_violation
-        scores[f"{label}_verified_repair_distance"] = summary.mean_repair_distance
-        scores[f"{label}_verified_fallback_rate"] = summary.fallback_rate
-        labeled_summaries.append((f"{label}_baseline", summary))
-    return scores, tuple(labeled_summaries)
+    return candidate, evaluation, summary
+
+
+def _add_baseline_scores(
+    scores: dict[str, float],
+    label: str,
+    evaluation: Any,
+    summary: CandidateRolloutSummary,
+) -> None:
+    scores[f"{label}_one_step_cost"] = float(evaluation.stage_cost)
+    scores[f"{label}_verified_risk_score"] = summary.risk_score
+    scores[f"{label}_verified_mean_cost"] = summary.mean_cost
+    scores[f"{label}_verified_cvar_cost"] = summary.cvar_cost
+    scores[f"{label}_verified_constraint_violation"] = summary.mean_constraint_violation
+    scores[f"{label}_verified_repair_distance"] = summary.mean_repair_distance
+    scores[f"{label}_verified_fallback_rate"] = summary.fallback_rate
 
 
 def _rollout_log(
@@ -556,33 +549,47 @@ def _verify_and_log(
     scenario_id: str,
     split: str,
     observation_payload: dict[str, Any],
+    prompt_artifact: PromptArtifact,
     env: HapsIsacEnv,
     state: SimulatorState,
     parsed: ParsedTeacherResponse,
     teacher_config: TeacherConfig,
     master_seed: int,
 ) -> ParsedCandidate:
+    """Verify the expanded candidate pool and persist full decision provenance."""
+
+    observation = {key: np.asarray(value) for key, value in observation_payload.items()}
+    pool = build_candidate_pool(
+        parsed,
+        prompt_artifact,
+        observation,
+        teacher_config.candidate_pool,
+    )
+    candidates = pool.candidates
+    candidates_by_index = {candidate.candidate_index: candidate for candidate in candidates}
+    if pool.greedy_candidate_index is None:
+        raise ValueError("the qualification pipeline requires a selectable greedy baseline")
+    greedy_candidate = candidates_by_index[pool.greedy_candidate_index]
     common_seed = common_rollout_seeds(state_id, master_seed, 1)[0]
     one_steps = {
-        candidate.candidate_index: evaluate_one_step(
-            env,
-            state,
-            candidate,
-            common_seed,
-        )
-        for candidate in parsed.candidates
+        candidate.candidate_index: evaluate_one_step(env, state, candidate, common_seed)
+        for candidate in candidates
     }
-    shortlisted = tuple(
+    shortlisted = list(
         sorted(
-            parsed.candidates,
+            candidates,
             key=lambda item: preliminary_score(one_steps[item.candidate_index]),
         )[: teacher_config.verification.shortlist_size]
     )
+    if all(
+        candidate.candidate_index != greedy_candidate.candidate_index for candidate in shortlisted
+    ):
+        shortlisted.append(greedy_candidate)
     summaries, selection, adaptive_rounds = _verify_shortlist_adaptively(
         env,
         state,
         state_id,
-        shortlisted,
+        tuple(shortlisted),
         one_steps,
         master_seed,
         teacher_config.verification,
@@ -590,8 +597,13 @@ def _verify_and_log(
     summary_map = {item.candidate_index: item for item in summaries}
     rankings = _ranking_map(selection)
     selected_index = selection.selected_candidate_index
+    selected_candidate = candidates_by_index[selected_index]
+    selected_evaluation = one_steps[selected_index]
+    selected_summary = summary_map[selected_index]
+    selected_ranking = rankings[selected_index]
 
     for summary in summaries:
+        candidate = candidates_by_index[summary.candidate_index]
         for rollout in summary.rollouts:
             retain = (
                 (
@@ -609,12 +621,22 @@ def _verify_and_log(
                     teacher_config.logging.trajectory_audit_fraction,
                 )
             )
-            writer.append("rollouts", _rollout_log(run_id, state_id, rollout, retain))
+            writer.append(
+                "rollouts",
+                _rollout_log(
+                    run_id,
+                    state_id,
+                    rollout,
+                    retain,
+                    policy_label=f"selectable_{candidate.source}",
+                ),
+            )
 
-    for candidate in parsed.candidates:
+    for candidate in candidates:
         evaluation = one_steps[candidate.candidate_index]
         candidate_summary = summary_map.get(candidate.candidate_index)
         ranking = rankings.get(candidate.candidate_index)
+        template_id, is_template_compliant = template_compliance(candidate, prompt_artifact)
         is_selected = candidate.candidate_index == selected_index
         writer.append(
             "candidates",
@@ -624,7 +646,11 @@ def _verify_and_log(
                 state_id=state_id,
                 request_id=request_id,
                 candidate_index=candidate.candidate_index,
+                candidate_source=candidate.source,
+                candidate_source_label=candidate.source_label,
                 reason_codes=candidate.reason_codes,
+                template_id=template_id,
+                template_compliant=is_template_compliant,
                 teacher_confidence=candidate.confidence,
                 proposed_action=action_as_dict(evaluation.proposed_action),
                 executed_action=action_as_dict(evaluation.executed_action),
@@ -664,27 +690,50 @@ def _verify_and_log(
             ),
         )
 
-    baseline_scores, baseline_summaries = _baseline_scores(
+    random_candidate, random_evaluation, random_summary = _random_baseline(
         env,
         state,
-        {key: np.asarray(value) for key, value in observation_payload.items()},
+        observation,
         state_id,
         master_seed,
         teacher_config.verification,
         selection.verification_rollouts,
+        common_seed,
     )
-    for policy_label, baseline_summary in baseline_summaries:
-        for rollout in baseline_summary.rollouts:
-            writer.append(
-                "rollouts",
-                _rollout_log(
-                    run_id,
-                    state_id,
-                    rollout,
-                    retain=False,
-                    policy_label=policy_label,
-                ),
-            )
+    for rollout in random_summary.rollouts:
+        writer.append(
+            "rollouts",
+            _rollout_log(
+                run_id,
+                state_id,
+                rollout,
+                retain=False,
+                policy_label=random_candidate.source,
+            ),
+        )
+    baseline_scores: dict[str, float] = {}
+    _add_baseline_scores(
+        baseline_scores,
+        "greedy",
+        one_steps[greedy_candidate.candidate_index],
+        summary_map[greedy_candidate.candidate_index],
+    )
+    _add_baseline_scores(baseline_scores, "random", random_evaluation, random_summary)
+
+    oracle_regret: float | None = None
+    oracle_diagnostic: dict[str, Any] | None = None
+    if teacher_config.candidate_pool.enable_one_step_grid_oracle_diagnostic:
+        oracle = one_step_grid_oracle(env, state=state, rollout_seed=common_seed)
+        oracle_regret = float(selected_evaluation.stage_cost - oracle.stage_cost)
+        oracle_diagnostic = {
+            "reference": "reduced_grid_one_step_stage_cost_not_global_optimum",
+            "stage_cost": oracle.stage_cost,
+            "hard_feasible": oracle.hard_feasible,
+            "repair_distance": oracle.repair_distance,
+            "candidates_evaluated": oracle.candidates_evaluated,
+            "selected_minus_oracle_stage_cost": oracle_regret,
+        }
+
     writer.append(
         "selections",
         SelectionLogRecord(
@@ -692,6 +741,15 @@ def _verify_and_log(
             run_id=run_id,
             state_id=state_id,
             selected_candidate_index=selected_index,
+            selected_candidate_source=selected_candidate.source,
+            candidate_pool_count=len(candidates),
+            teacher_candidate_count=pool.teacher_candidate_count,
+            safe_template_expected_count=pool.safe_template_expected_count,
+            safe_template_coverage_rate=pool.safe_template_coverage_rate,
+            candidate_source_counts=pool.source_counts,
+            greedy_candidate_index=greedy_candidate.candidate_index,
+            verified_candidate_count=len(summaries),
+            external_baseline_rollout_count=1,
             score_margin=selection.score_margin,
             standardized_margin=selection.standardized_margin,
             selection_uncertain=selection.selection_uncertain,
@@ -699,9 +757,10 @@ def _verify_and_log(
             margin_confidence_upper=selection.margin_confidence_upper,
             selection_probability=selection.selection_probability,
             baseline_scores=baseline_scores,
-            oracle_regret=None,
+            oracle_regret=oracle_regret,
+            oracle_diagnostic=oracle_diagnostic,
             acceptance_status="accepted",
-            acceptance_reason="adaptive_common_random_rollout_ranking",
+            acceptance_reason="adaptive_common_random_rollout_ranking_with_selectable_greedy_floor",
             decision_status=selection.decision_status,
             practical_equivalence_margin=(teacher_config.verification.practical_equivalence_margin),
             equivalent_candidate_indices=selection.equivalent_candidate_indices,
@@ -709,10 +768,6 @@ def _verify_and_log(
             adaptive_rounds=adaptive_rounds,
         ),
     )
-    selected_candidate = parsed.candidates[selected_index]
-    selected_evaluation = one_steps[selected_index]
-    selected_summary = summary_map[selected_index]
-    selected_ranking = rankings[selected_index]
     target_indices = selection.equivalent_candidate_indices
     target_weight_total = sum(rankings[index].quality_weight for index in target_indices)
     target_candidates = tuple(
@@ -757,6 +812,8 @@ def _verify_and_log(
         reason_codes=selected_candidate.reason_codes,
         confidence=selected_candidate.confidence,
         canonical_key=selected_candidate.canonical_key,
+        source=selected_candidate.source,
+        source_label=selected_candidate.source_label,
     )
 
 
@@ -859,6 +916,7 @@ def generate_demonstrations(
                 state_id,
                 teacher_config.prompt_version,
                 teacher_config.num_candidates,
+                teacher_config.verification,
             )
             writer.append(
                 "states",
@@ -873,8 +931,11 @@ def generate_demonstrations(
                     causal_state_hash=prompt.causal_state_hash,
                     observation=prompt.causal_payload,
                     teacher_guidance={
+                        "semantic_state_packet": prompt.semantic_state_packet,
+                        "optimization_contract": prompt.optimization_contract,
                         "sensing_only_template": prompt.sensing_only_template,
                         "sic_safe_templates": prompt.sic_safe_templates,
+                        "candidate_pool": teacher_config.candidate_pool.model_dump(mode="json"),
                     },
                     state_metrics=_state_metrics(state),
                     verifier_only=_verifier_only(state),
@@ -920,6 +981,15 @@ def generate_demonstrations(
                         run_id=effective_run_id,
                         state_id=state_id,
                         selected_candidate_index=-1,
+                        selected_candidate_source="none",
+                        candidate_pool_count=0,
+                        teacher_candidate_count=0,
+                        safe_template_expected_count=0,
+                        safe_template_coverage_rate=0.0,
+                        candidate_source_counts={},
+                        greedy_candidate_index=None,
+                        verified_candidate_count=0,
+                        external_baseline_rollout_count=0,
                         score_margin=0.0,
                         standardized_margin=0.0,
                         selection_uncertain=True,
@@ -928,6 +998,7 @@ def generate_demonstrations(
                         selection_probability=0.0,
                         baseline_scores={},
                         oracle_regret=None,
+                        oracle_diagnostic=None,
                         acceptance_status="rejected",
                         acceptance_reason=parse_error or "teacher request failed",
                         decision_status="unresolved",
@@ -959,6 +1030,7 @@ def generate_demonstrations(
                     scenario_id,
                     split,
                     prompt.causal_payload,
+                    prompt,
                     env,
                     state,
                     parsed,

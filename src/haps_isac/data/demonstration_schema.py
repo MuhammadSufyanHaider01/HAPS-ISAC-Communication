@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 from pydantic import BaseModel
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def utc_now() -> str:
@@ -85,6 +85,7 @@ class RunManifest:
     sampling_strategy: str = "sequential"
     state_distribution: dict[str, float] = field(default_factory=dict)
     split_fractions: dict[str, float] = field(default_factory=dict)
+    candidate_pool_config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +145,11 @@ class CandidateLogRecord:
     state_id: str
     request_id: str
     candidate_index: int
+    candidate_source: str
+    candidate_source_label: str
     reason_codes: tuple[str, ...]
+    template_id: str | None
+    template_compliant: bool | None
     teacher_confidence: float
     proposed_action: dict[str, Any]
     executed_action: dict[str, Any]
@@ -195,6 +200,15 @@ class SelectionLogRecord:
     run_id: str
     state_id: str
     selected_candidate_index: int
+    selected_candidate_source: str
+    candidate_pool_count: int
+    teacher_candidate_count: int
+    safe_template_expected_count: int
+    safe_template_coverage_rate: float
+    candidate_source_counts: dict[str, int]
+    greedy_candidate_index: int | None
+    verified_candidate_count: int
+    external_baseline_rollout_count: int
     score_margin: float
     standardized_margin: float
     selection_uncertain: bool
@@ -203,6 +217,7 @@ class SelectionLogRecord:
     selection_probability: float
     baseline_scores: dict[str, float]
     oracle_regret: float | None
+    oracle_diagnostic: dict[str, Any] | None
     acceptance_status: str
     acceptance_reason: str
     decision_status: str

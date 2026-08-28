@@ -63,6 +63,9 @@ def prepare_resume_directory(
         state_id = str(record["state_id"])
         rollout_counts[state_id] = rollout_counts.get(state_id, 0) + 1
 
+    schema_version = int(
+        json.loads((root / "manifest.json").read_text(encoding="utf-8")).get("schema_version", 0)
+    )
     complete_ids: list[str] = []
     for state in tables["states"]:
         state_id = str(state["state_id"])
@@ -72,10 +75,18 @@ def prepare_resume_directory(
             break
         if selection.get("acceptance_status") == "accepted":
             verification_rollouts = int(selection.get("verification_rollouts", 0))
-            expected_rollouts = (shortlist_size + 2) * verification_rollouts
+            if schema_version >= 5:
+                expected_candidate_count = int(selection.get("candidate_pool_count", 0))
+                expected_rollouts = (
+                    int(selection.get("verified_candidate_count", 0))
+                    + int(selection.get("external_baseline_rollout_count", 0))
+                ) * verification_rollouts
+            else:
+                expected_candidate_count = expected_candidates
+                expected_rollouts = (shortlist_size + 2) * verification_rollouts
             complete = (
                 state_id in demonstration_ids
-                and candidate_counts.get(state_id, 0) == expected_candidates
+                and candidate_counts.get(state_id, 0) == expected_candidate_count
                 and verification_rollouts > 0
                 and rollout_counts.get(state_id, 0) == expected_rollouts
             )

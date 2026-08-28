@@ -54,6 +54,26 @@ class VerificationConfig(FrozenModel):
         return self
 
 
+class CandidatePoolConfig(FrozenModel):
+    """Deterministic candidates that make teacher selection coverage-complete."""
+
+    include_safe_template_bank: bool = True
+    template_cpu_fractions: tuple[float, ...] = (0.0, 0.5, 1.0)
+    include_selectable_greedy_baseline: bool = True
+    enable_one_step_grid_oracle_diagnostic: bool = True
+
+    @model_validator(mode="after")
+    def validate_template_cpu_fractions(self) -> Self:
+        values = self.template_cpu_fractions
+        if not values:
+            raise ValueError("template_cpu_fractions must not be empty")
+        if any(not 0.0 <= value <= 1.0 for value in values):
+            raise ValueError("template_cpu_fractions must lie in [0, 1]")
+        if len(set(values)) != len(values):
+            raise ValueError("template_cpu_fractions must be unique")
+        return self
+
+
 class DatasetFractionConfig(FrozenModel):
     ordinary: float = Field(ge=0.0, le=1.0)
     freshness_stress: float = Field(ge=0.0, le=1.0)
@@ -120,6 +140,7 @@ class TeacherConfig(FrozenModel):
     cache_directory: str
     sampling: SamplingConfig
     verification: VerificationConfig
+    candidate_pool: CandidatePoolConfig = CandidatePoolConfig()
     dataset: DatasetSamplingConfig = DatasetSamplingConfig()
     logging: LoggingConfig
 

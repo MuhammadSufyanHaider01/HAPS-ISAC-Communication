@@ -82,13 +82,33 @@ def audit_dataset(directory: str) -> DatasetAudit:
 
     valid_requests = [record for record in requests if record["schema_valid"]]
     expected_candidates = int(loader.manifest["num_candidates"])
+    schema_version = int(loader.manifest.get("schema_version", 0))
     candidates_by_state: dict[str, int] = {}
+    teacher_candidates_by_state: dict[str, int] = {}
     for record in candidates:
         state_id = str(record["state_id"])
         candidates_by_state[state_id] = candidates_by_state.get(state_id, 0) + 1
+        if str(record.get("candidate_source", "teacher")) == "teacher":
+            teacher_candidates_by_state[state_id] = teacher_candidates_by_state.get(state_id, 0) + 1
+    selections_by_state = {str(record["state_id"]): record for record in selections}
     for request in valid_requests:
         state_id = str(request["state_id"])
-        if candidates_by_state.get(state_id, 0) != expected_candidates:
+        if schema_version >= 5:
+            actual_teacher = teacher_candidates_by_state.get(state_id, 0)
+            expected_pool = int(
+                selections_by_state.get(state_id, {}).get("candidate_pool_count", 0)
+            )
+            if actual_teacher != expected_candidates:
+                errors.append(
+                    f"{state_id} has {actual_teacher} teacher candidates; "
+                    f"expected {expected_candidates}"
+                )
+            if candidates_by_state.get(state_id, 0) != expected_pool:
+                errors.append(
+                    f"{state_id} has {candidates_by_state.get(state_id, 0)} pool candidates; "
+                    f"expected {expected_pool}"
+                )
+        elif candidates_by_state.get(state_id, 0) != expected_candidates:
             errors.append(
                 f"{state_id} has {candidates_by_state.get(state_id, 0)} candidates; "
                 f"expected {expected_candidates}"
@@ -149,7 +169,6 @@ def audit_dataset(directory: str) -> DatasetAudit:
         else:
             valid_targets += 1
 
-    schema_version = int(loader.manifest.get("schema_version", 0))
     if schema_version >= 4:
         global_indices = [int(record.get("global_state_index", -1)) for record in states]
         if len(global_indices) != len(set(global_indices)):
@@ -176,7 +195,12 @@ def audit_dataset(directory: str) -> DatasetAudit:
                 for record in candidates
                 if str(record["state_id"]) == state_id
             )
-            expected_rollouts = (verified_candidates + 2) * verification_rollouts
+            external_baselines = (
+                int(selection.get("external_baseline_rollout_count", 0))
+                if schema_version >= 5
+                else 2
+            )
+            expected_rollouts = (verified_candidates + external_baselines) * verification_rollouts
             if (
                 verification_rollouts <= 0
                 or rollout_counts_by_state.get(state_id, 0) != expected_rollouts
@@ -190,6 +214,15 @@ def audit_dataset(directory: str) -> DatasetAudit:
     if leaking:
         errors.append(f"{len(leaking)} scenarios cross dataset splits")
 
+    metric_candidates = (
+        [
+            record
+            for record in candidates
+            if str(record.get("candidate_source", "teacher")) == "teacher"
+        ]
+        if schema_version >= 5
+        else candidates
+    )
     parse_rate = (
         float(np.mean([record["schema_valid"] for record in requests])) if requests else 0.0
     )
@@ -207,15 +240,19 @@ def audit_dataset(directory: str) -> DatasetAudit:
         else 0.0
     )
     candidate_hard_rate = (
-        float(np.mean([record["hard_feasible"] for record in candidates])) if candidates else 0.0
+        float(np.mean([record["hard_feasible"] for record in metric_candidates]))
+        if metric_candidates
+        else 0.0
     )
     pre_repair_rate = (
-        float(np.mean([record["pre_repair_feasible"] for record in candidates]))
-        if candidates
+        float(np.mean([record["pre_repair_feasible"] for record in metric_candidates]))
+        if metric_candidates
         else 0.0
     )
     fallback_rate = (
-        float(np.mean([record["fallback_used"] for record in candidates])) if candidates else 0.0
+        float(np.mean([record["fallback_used"] for record in metric_candidates]))
+        if metric_candidates
+        else 0.0
     )
     selected_candidates = [record for record in candidates if bool(record["selected"])]
     selected_fallback_rate = (
@@ -229,7 +266,7 @@ def audit_dataset(directory: str) -> DatasetAudit:
         0.95,
     )
     candidate_records_by_state: dict[str, list[dict[str, Any]]] = {}
-    for candidate in candidates:
+    for candidate in metric_candidates:
         candidate_records_by_state.setdefault(str(candidate["state_id"]), []).append(candidate)
     executed_unique_ratios = [
         len(
@@ -311,10 +348,42 @@ def audit_dataset(directory: str) -> DatasetAudit:
         if record["completion_tokens"] is not None
     ]
 
+    template_compliance_rate = (
+        float(
+            np.mean([bool(record.get("template_compliant", False)) for record in metric_candidates])
+        )
+        if metric_candidates
+        else 0.0
+    )
+    safe_template_coverage_rate = (
+        float(
+            np.mean(
+                [
+                    float(record.get("safe_template_coverage_rate", 0.0))
+                    for record in accepted_selections
+                ]
+            )
+        )
+        if accepted_selections
+        else 0.0
+    )
+    greedy_selectable_rate = (
+        float(
+            np.mean(
+                [record.get("greedy_candidate_index") is not None for record in accepted_selections]
+            )
+        )
+        if accepted_selections
+        else 0.0
+    )
+
     metrics = {
         "request_schema_valid_rate": parse_rate,
         "candidate_unique_ratio": unique_ratio,
         "candidate_role_compliance_rate": candidate_role_compliance_rate,
+        "teacher_template_compliance_rate": template_compliance_rate,
+        "safe_template_coverage_rate": safe_template_coverage_rate,
+        "greedy_selectable_rate": greedy_selectable_rate,
         "executed_candidate_unique_ratio": executed_candidate_unique_ratio,
         "selected_fallback_rate": selected_fallback_rate,
         "selected_p95_repair_distance": selected_p95_repair_distance,
@@ -364,13 +433,13 @@ def audit_dataset(directory: str) -> DatasetAudit:
         "candidate_pre_repair_feasible_rate": pre_repair_rate,
         "candidate_post_repair_hard_feasible_rate": candidate_hard_rate,
         "candidate_repair_rate": (
-            float(np.mean([record["repair_distance"] > 1e-12 for record in candidates]))
-            if candidates
+            float(np.mean([record["repair_distance"] > 1e-12 for record in metric_candidates]))
+            if metric_candidates
             else 0.0
         ),
-        "candidate_mean_repair_distance": _mean(candidates, "repair_distance"),
+        "candidate_mean_repair_distance": _mean(metric_candidates, "repair_distance"),
         "candidate_p95_repair_distance": _quantile(
-            candidates,
+            metric_candidates,
             "repair_distance",
             0.95,
         ),
@@ -396,8 +465,16 @@ def audit_dataset(directory: str) -> DatasetAudit:
         warnings.append("candidate fallback rate is above 5%")
     if metrics["candidate_p95_repair_distance"] > 0.25:
         warnings.append("candidate p95 repair distance is above 0.25")
-    if candidate_role_compliance_rate < 0.95:
+    if schema_version < 5 and candidate_role_compliance_rate < 0.95:
         warnings.append("fewer than 95% of states have exactly one sensing-only candidate")
+    if schema_version >= 5 and template_compliance_rate < 0.95:
+        warnings.append(
+            "fewer than 95% of teacher candidates comply with the referenced safe template"
+        )
+    if schema_version >= 5 and safe_template_coverage_rate < 1.0:
+        warnings.append("deterministic safe-template bank coverage is incomplete")
+    if schema_version >= 5 and greedy_selectable_rate < 1.0:
+        warnings.append("the selectable greedy floor is missing for at least one accepted state")
     if executed_candidate_unique_ratio < 0.75:
         warnings.append("post-repair candidate uniqueness is below 75%")
     if selected_fallback_rate > 0.0:

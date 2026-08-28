@@ -42,6 +42,8 @@ class ParsedCandidate:
     reason_codes: tuple[str, ...]
     confidence: float
     canonical_key: tuple[int | float, ...]
+    source: str = "teacher"
+    source_label: str = "teacher_response"
 
 
 @dataclass(frozen=True, slots=True)

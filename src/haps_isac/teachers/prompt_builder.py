@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
@@ -18,10 +18,39 @@ from haps_isac.envs.state import SimulatorState
 from haps_isac.physics.channels import effective_beam_gain
 from haps_isac.units import thermal_noise_watts
 
+if TYPE_CHECKING:
+    from haps_isac.teachers.base_teacher import VerificationConfig
+
 Observation = dict[str, npt.NDArray[np.generic]]
 SIC_TEMPLATE_SENSING_FRACTIONS = (0.05, 0.25, 0.45)
 SIC_TEMPLATE_NEAR_FRACTION = 0.20
 SIC_TEMPLATE_POWER_MARGIN = 1.15
+PAIR_TOKEN_FIELDS = (
+    "near_aoi_fraction",
+    "far_aoi_fraction",
+    "near_aoli_fraction",
+    "far_aoli_fraction",
+    "near_channel_gain_fraction",
+    "far_channel_gain_fraction",
+    "near_csi_uncertainty_fraction",
+    "far_csi_uncertainty_fraction",
+    "near_packet_fraction",
+    "far_packet_fraction",
+    "previous_sic_margin_tanh",
+    "waiting_time_fraction",
+)
+COVARIANCE_CHOLESKY_FIELDS = (
+    "L00",
+    "L10",
+    "L11",
+    "L20",
+    "L21",
+    "L22",
+    "L30",
+    "L31",
+    "L32",
+    "L33",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +61,8 @@ class PromptArtifact:
     prompt_hash: str
     causal_state_hash: str
     causal_payload: dict[str, Any]
+    semantic_state_packet: dict[str, Any]
+    optimization_contract: dict[str, Any]
     sensing_only_template: dict[str, Any]
 
     sic_safe_templates: tuple[dict[str, Any], ...]
@@ -61,6 +92,167 @@ def causal_observation_payload(observation: Observation) -> dict[str, Any]:
         "virtual_queues": _rounded_list(observation["virtual_queues"]),
         "previous_action": _rounded_list(observation["previous_action"]),
     }
+
+
+def build_semantic_state_packet(
+    config: ExperimentConfig,
+    causal: dict[str, Any],
+) -> dict[str, Any]:
+    """Name every causal feature exposed to the numerical policy.
+
+    The student continues to train on compact tensors in ``causal``. The teacher,
+    however, needs feature names and directions rather than a hidden positional
+    encoding inside a JSON array.
+    """
+
+    tokens = causal["pair_tokens"]
+    queues = causal["virtual_queues"]
+    users = config.num_users
+    pairs: list[dict[str, Any]] = []
+    queue_pairs: list[dict[str, Any]] = []
+    for pair_index, token in enumerate(tokens):
+        if len(token) != 14:
+            raise ValueError("pair token contract must have 14 elements")
+        pair_values = {
+            field: float(token[index]) for index, field in enumerate(PAIR_TOKEN_FIELDS[:8])
+        }
+        pair_values.update(
+            {
+                "pair_id": pair_index + 1,
+                "active": bool(causal["pair_mask"][pair_index]),
+                "near_packet_fraction": float(token[10]),
+                "far_packet_fraction": float(token[11]),
+                "previous_sic_margin_tanh": float(token[12]),
+                "waiting_time_fraction": float(token[13]),
+            }
+        )
+        pairs.append(pair_values)
+        near_user = 2 * pair_index
+        far_user = near_user + 1
+        queue_pairs.append(
+            {
+                "pair_id": pair_index + 1,
+                "near": {
+                    "aoli_deficit": float(queues[near_user]),
+                    "delivery_deficit": float(queues[users + near_user]),
+                    "secrecy_outage_deficit": float(queues[2 * users + near_user]),
+                },
+                "far": {
+                    "aoli_deficit": float(queues[far_user]),
+                    "delivery_deficit": float(queues[users + far_user]),
+                    "secrecy_outage_deficit": float(queues[2 * users + far_user]),
+                },
+            }
+        )
+
+    global_features = causal["global_features"]
+    if len(global_features) != 25:
+        raise ValueError("global feature contract must have 25 elements")
+    previous_action = causal["previous_action"]
+    if len(previous_action) != 9:
+        raise ValueError("previous action contract must have 9 elements")
+    if len(queues) != config.num_virtual_queues:
+        raise ValueError("virtual queue contract does not match the configured system")
+
+    return {
+        "packet_version": "2.0",
+        "normalization": {
+            "bounded_fraction_fields": (
+                "[0, 1] where larger means more urgency, gain, uncertainty, or deficit "
+                "unless explicitly signed"
+            ),
+            "signed_fields": [
+                "target_position_x_normalized",
+                "target_position_y_normalized",
+                "target_velocity_x_normalized",
+                "target_velocity_y_normalized",
+                "target_covariance_cholesky_lower_normalized",
+                "previous_heading_fraction_of_pi",
+                "previous_sic_margin_tanh",
+            ],
+            "virtual_queue_transform": (
+                "clip(log1p(raw_queue) / log1p(queue_reference), 0, 1); larger means "
+                "a larger accumulated long-term constraint deficit"
+            ),
+        },
+        "pairs": pairs,
+        "global": {
+            "aosi_fraction": float(global_features[0]),
+            "target_position_x_normalized": float(global_features[1]),
+            "target_position_y_normalized": float(global_features[2]),
+            "target_velocity_x_normalized": float(global_features[3]),
+            "target_velocity_y_normalized": float(global_features[4]),
+            "target_covariance_cholesky_lower_normalized": {
+                field: float(global_features[5 + index])
+                for index, field in enumerate(COVARIANCE_CHOLESKY_FIELDS)
+            },
+        },
+        "virtual_queues": {
+            "per_pair": queue_pairs,
+            "sensing_outage_deficit": float(queues[3 * users]),
+            "tracking_uncertainty_deficit": float(queues[3 * users + 1]),
+        },
+        "previous_action": {
+            "scheduled_pair_fraction": float(previous_action[0]),
+            "eta_haps": float(previous_action[2]),
+            "eta_communication": float(previous_action[3]),
+            "eta_near_fraction_of_maximum": float(previous_action[4]),
+            "eta_jamming": float(previous_action[5]),
+            "previous_heading_fraction_of_pi": float(previous_action[6]),
+            "aav_speed_fraction": float(previous_action[7]),
+            "eta_cpu": float(previous_action[8]),
+        },
+    }
+
+
+def build_optimization_contract(
+    config: ExperimentConfig,
+    verification: VerificationConfig | None,
+) -> dict[str, Any]:
+    """Expose the causal objective and verifier definition to the teacher."""
+
+    contract: dict[str, Any] = {
+        "decision_rule": (
+            "minimize risk-sensitive verifier score; all hard-feasible actions dominate "
+            "infeasible actions"
+        ),
+        "stage_cost_weights": {
+            "mean_aoi": config.objective.weight_aoi,
+            "aosi": config.objective.weight_aosi,
+            "tracking_uncertainty": config.objective.weight_uncertainty,
+            "energy": config.objective.weight_energy,
+        },
+        "long_term_constraint_targets": {
+            "minimum_aoli_slots": config.constraints.minimum_aoli_slots,
+            "minimum_delivery_rate": config.constraints.minimum_delivery_rate,
+            "maximum_secrecy_outage_probability": config.constraints.secrecy_outage_probability,
+            "maximum_sensing_outage_probability": config.constraints.sensing_outage_probability,
+            "maximum_tracking_covariance_trace": config.constraints.maximum_covariance_trace,
+        },
+        "queue_interpretation": (
+            "larger normalized queue values indicate greater accumulated violation pressure "
+            "and should increase priority when physically feasible"
+        ),
+    }
+    if verification is not None:
+        contract["rollout_verifier"] = {
+            "candidate_controlled_steps": [0],
+            "continuation_policy_after_step_zero": "urgency_greedy",
+            "horizon_slots": verification.rollout_horizon_slots,
+            "initial_monte_carlo_rollouts": verification.monte_carlo_rollouts,
+            "maximum_monte_carlo_rollouts": verification.max_monte_carlo_rollouts,
+            "discount_factor": verification.discount_factor,
+            "risk_score": {
+                "mean_cost_weight": 1.0 - verification.cvar_weight,
+                "cvar_alpha": verification.cvar_alpha,
+                "cvar_weight": verification.cvar_weight,
+                "mean_constraint_violation_weight": verification.constraint_weight,
+                "mean_repair_distance_weight": verification.repair_weight,
+                "fallback_rate_weight": verification.fallback_weight,
+                "hard_infeasibility_penalty": 1000.0,
+            },
+        }
+    return contract
 
 
 def _round_up(value: float, decimals: int = 6) -> float:
@@ -185,7 +377,14 @@ def build_teacher_prompt(
     state_id: str,
     prompt_version: str,
     num_candidates: int,
+    verification: VerificationConfig | None = None,
 ) -> PromptArtifact:
+    """Build a causal, semantically named teacher request.
+
+    The raw observation remains the distillation input. This packet is only the
+    teacher-facing explanation of the same causal information.
+    """
+
     if num_candidates <= 0:
         raise ValueError("num_candidates must be positive")
     causal = causal_observation_payload(observation)
@@ -193,6 +392,22 @@ def build_teacher_prompt(
     state_hash = hashlib.sha256(canonical_state.encode("utf-8")).hexdigest()
     sic_templates = build_sic_safe_templates(config, state)
     sensing_only_template = build_sensing_only_template(config)
+    semantic_state_packet = build_semantic_state_packet(config, causal)
+    optimization_contract = build_optimization_contract(config, verification)
+    action_bank = {
+        "sensing_only_template": sensing_only_template,
+        "noma_templates": sic_templates,
+        "deterministic_verifier_coverage": {
+            "description": (
+                "Every listed template is independently added to the verifier pool at several "
+                "CPU fractions, together with a selectable urgency-greedy baseline."
+            ),
+            "teacher_role": (
+                "Provide complementary state-specific refinements; do not use output ordering "
+                "to implement template coverage."
+            ),
+        },
+    }
     task = {
         "schema_version": 1,
         "prompt_version": prompt_version,
@@ -200,7 +415,7 @@ def build_teacher_prompt(
         "num_pairs": config.system.num_noma_pairs,
         "num_candidates": num_candidates,
         "features": config.features.model_dump(),
-        "constraints": {
+        "physical_constraints": {
             "maximum_haps_power_w": config.haps.max_power_w,
             "minimum_sensing_power_w": config.constraints.minimum_sensing_power_w,
             "sic_sinr_threshold": config.constraints.sic_sinr_threshold,
@@ -208,31 +423,31 @@ def build_teacher_prompt(
             "sensing_sinr_threshold": config.constraints.sensing_sinr_threshold,
             "maximum_covariance_trace": config.constraints.maximum_covariance_trace,
         },
-        "sic_safe_templates": sic_templates,
-        "sensing_only_template": sensing_only_template,
-        "causal_observation": causal,
+        "optimization_contract": optimization_contract,
+        "causal_state": semantic_state_packet,
+        "action_bank": action_bank,
     }
     instructions = (
-        f"Propose exactly {num_candidates} diverse high-level actions for the supplied "
-        "causal HAPS-ISAC state. pair is 0 (sensing only) or "
-        f"1..{config.system.num_noma_pairs}. All fractions are "
-        "bounded: eta_haps, eta_communication, eta_jamming, aav_speed_fraction and "
-        "eta_cpu in [0,1], eta_near in [0,0.5], heading in [-pi,pi]. For Version 1, "
-        "every candidate MUST set the exact values ris_code=0, eta_jamming=0.0, "
-        "aav_heading_rad=0.0 and aav_speed_fraction=0.0; there are no exceptions. "
-        "Return exactly one sensing-only candidate copied from sensing_only_template: "
-        "copy its pair, eta_haps, eta_communication, and eta_near exactly and put its "
-        "template_id in reason_codes. Every other candidate MUST be a NOMA action copied from one "
-        "entry in sic_safe_templates: copy that entry's pair, eta_haps, and "
-        "eta_communication exactly, set eta_near no higher than maximum_eta_near, and "
-        "put its template_id in reason_codes. Use distinct templates when possible and "
-        "cover every available pair before repeating one. These templates already "
-        "satisfy sensing_power_w=eta_haps*(1-eta_communication)*maximum_haps_power_w, "
-        "the minimum sensing constraint, and estimated-channel SIC with a safety "
-        "margin. Favor freshness while respecting sensing, SIC, secrecy and long-term "
-        "queues. Return only JSON with schema_version=1, the exact "
-        "state_id, and a candidates array. Each candidate must contain pair, ris_code, "
-        "eta_haps, eta_communication, eta_near, eta_jamming, aav_heading_rad, "
+        f"Propose exactly {num_candidates} distinct high-level action refinements for the "
+        "supplied causal HAPS-ISAC state. The verifier minimizes the supplied "
+        "risk-sensitive objective, so use the named state features, objective weights, "
+        "long-term deficits, and rollout contract rather than treating vector positions "
+        "as anonymous numbers. pair is 0 (sensing only) or "
+        f"1..{config.system.num_noma_pairs}. All fractions are bounded: eta_haps, "
+        "eta_communication, eta_jamming, aav_speed_fraction and eta_cpu in [0,1], "
+        "eta_near in [0,0.5], heading in [-pi,pi]. For Version 1, every candidate "
+        "MUST set the exact values ris_code=0, eta_jamming=0.0, "
+        "aav_heading_rad=0.0 and aav_speed_fraction=0.0. For pair=0, copy the "
+        "sensing-only template's pair, eta_haps, eta_communication, and eta_near "
+        "exactly. For pair>0, choose a NOMA template from action_bank, copy its "
+        "template_id, pair, eta_haps, and eta_communication exactly, and set eta_near "
+        "no higher than maximum_eta_near. Put the exact template_id in reason_codes. "
+        "The verifier already evaluates every safe template and a greedy baseline, so "
+        "do not reserve a fixed candidate position for sensing-only or for pair coverage; "
+        "use these candidates for state-specific choices of template, eta_near, and "
+        "eta_cpu. Return only JSON with schema_version=1, the exact state_id, and a "
+        "candidates array. Each candidate must contain pair, ris_code, eta_haps, "
+        "eta_communication, eta_near, eta_jamming, aav_heading_rad, "
         "aav_speed_fraction, eta_cpu, reason_codes (short strings), and confidence "
         "in [0,1]."
     )
@@ -245,6 +460,8 @@ def build_teacher_prompt(
         prompt_hash=prompt_hash,
         causal_state_hash=state_hash,
         causal_payload=causal,
+        semantic_state_packet=semantic_state_packet,
+        optimization_contract=optimization_contract,
         sic_safe_templates=sic_templates,
         sensing_only_template=sensing_only_template,
     )

@@ -25,7 +25,9 @@ ACTION_FIELDS = (
 SCALE_UP_THRESHOLDS = {
     "request_schema_valid_rate": (">=", 0.99),
     "candidate_unique_ratio": (">=", 0.75),
-    "candidate_role_compliance_rate": (">=", 0.95),
+    "teacher_template_compliance_rate": (">=", 0.95),
+    "safe_template_coverage_rate": (">=", 1.0),
+    "greedy_selectable_rate": (">=", 1.0),
     "executed_candidate_unique_ratio": (">=", 0.75),
     "candidate_post_repair_hard_feasible_rate": (">=", 1.0),
     "candidate_fallback_rate": ("<=", 0.05),
@@ -39,6 +41,7 @@ SCALE_UP_THRESHOLDS = {
     "split_distribution_max_abs_error": ("<=", 0.02),
     "demonstration_acceptance_rate": (">=", 0.99),
     "selected_vs_greedy_verified_win_rate": (">=", 0.55),
+    "selected_no_worse_than_greedy_verified_rate": (">=", 1.0),
     "selected_vs_random_verified_win_rate": (">=", 0.55),
     "mean_greedy_minus_selected_verified_risk": (">=", 0.0),
     "mean_random_minus_selected_verified_risk": (">=", 0.0),
@@ -261,6 +264,12 @@ def _baseline_comparison(
                 for selected, baseline in zip(selected_risks, greedy_risks, strict=True)
             ]
         ),
+        "selected_no_worse_than_greedy_verified_rate": _mean(
+            [
+                float(selected <= baseline + 1e-12)
+                for selected, baseline in zip(selected_risks, greedy_risks, strict=True)
+            ]
+        ),
         "selected_vs_random_verified_win_rate": _mean(
             [
                 float(selected < baseline)
@@ -372,11 +381,43 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
             for record in valid_requests
         ]
     )
-    candidate_summary = _candidate_summary(candidates)
+    schema_version = int(loader.manifest.get("schema_version", 0))
+    teacher_candidates = (
+        [
+            candidate
+            for candidate in candidates
+            if str(candidate.get("candidate_source", "teacher")) == "teacher"
+        ]
+        if schema_version >= 5
+        else candidates
+    )
+    candidate_summary = _candidate_summary(teacher_candidates)
+    pool_candidate_summary = _candidate_summary(candidates)
     selected_candidates = [candidate for candidate in candidates if bool(candidate["selected"])]
     selected_summary = _candidate_summary(selected_candidates)
-    action_diversity = _action_diversity(candidates)
-    candidate_role_compliance_rate = _candidate_role_compliance_rate(candidates)
+    action_diversity = _action_diversity(teacher_candidates)
+    candidate_role_compliance_rate = _candidate_role_compliance_rate(teacher_candidates)
+    candidates_by_source = {
+        source: _candidate_summary(records)
+        for source, records in sorted(
+            {
+                source: [
+                    candidate
+                    for candidate in candidates
+                    if str(candidate.get("candidate_source", "teacher")) == source
+                ]
+                for source in {
+                    str(candidate.get("candidate_source", "teacher")) for candidate in candidates
+                }
+            }.items()
+        )
+    }
+    teacher_template_compliance_rate = _mean(
+        [
+            float(bool(candidate.get("template_compliant", False)))
+            for candidate in teacher_candidates
+        ]
+    )
     accepted_selections = [
         selection for selection in selections if selection["acceptance_status"] == "accepted"
     ]
@@ -404,10 +445,40 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
     ]
     adaptive_rounds = [float(record.get("adaptive_rounds", 0)) for record in accepted_selections]
     baseline_comparison = _baseline_comparison(candidates, selections)
+    safe_template_coverage_rate = _mean(
+        [
+            float(selection.get("safe_template_coverage_rate", 0.0))
+            for selection in accepted_selections
+        ]
+    )
+    greedy_selectable_rate = _mean(
+        [
+            float(selection.get("greedy_candidate_index") is not None)
+            for selection in accepted_selections
+        ]
+    )
+    selection_source_counts = Counter(
+        str(selection.get("selected_candidate_source", "unknown"))
+        for selection in accepted_selections
+    )
+    pool_sizes = [
+        float(selection.get("candidate_pool_count", 0)) for selection in accepted_selections
+    ]
+    verified_candidate_counts = [
+        float(selection.get("verified_candidate_count", 0)) for selection in accepted_selections
+    ]
+    oracle_regrets = [
+        float(selection["oracle_regret"])
+        for selection in accepted_selections
+        if selection.get("oracle_regret") is not None
+    ]
     metrics = {
         "request_schema_valid_rate": request_schema_valid_rate,
         "candidate_unique_ratio": candidate_unique_ratio,
         "candidate_role_compliance_rate": candidate_role_compliance_rate,
+        "teacher_template_compliance_rate": teacher_template_compliance_rate,
+        "safe_template_coverage_rate": safe_template_coverage_rate,
+        "greedy_selectable_rate": greedy_selectable_rate,
         "executed_candidate_unique_ratio": action_diversity["mean_executed_unique_ratio"],
         "candidate_post_repair_hard_feasible_rate": candidate_summary[
             "post_repair_hard_feasible_rate"
@@ -425,6 +496,9 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
         "demonstration_acceptance_rate": (len(demonstrations) / len(states) if states else 0.0),
         "selected_vs_greedy_verified_win_rate": baseline_comparison[
             "selected_vs_greedy_verified_win_rate"
+        ],
+        "selected_no_worse_than_greedy_verified_rate": baseline_comparison[
+            "selected_no_worse_than_greedy_verified_rate"
         ],
         "selected_vs_random_verified_win_rate": baseline_comparison[
             "selected_vs_random_verified_win_rate"
@@ -452,7 +526,7 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
         str(reason) for candidate in candidates for reason in candidate.get("repair_reasons", [])
     )
     confidence_groups: dict[str, list[dict[str, Any]]] = {}
-    for candidate in candidates:
+    for candidate in teacher_candidates:
         bucket = _confidence_bucket(float(candidate["teacher_confidence"]))
         confidence_groups.setdefault(bucket, []).append(candidate)
 
@@ -467,9 +541,12 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
             "demonstrations": len(demonstrations),
         },
         "candidate_summary": candidate_summary,
+        "pool_candidate_summary": pool_candidate_summary,
+        "candidate_sources": candidates_by_source,
         "selected_candidate_summary": selected_summary,
         "action_diversity": action_diversity,
         "candidate_role_compliance_rate": candidate_role_compliance_rate,
+        "teacher_template_compliance_rate": teacher_template_compliance_rate,
         "selection_quality": {
             "accepted_count": len(accepted_selections),
             "uncertain_rate": selection_uncertain_rate,
@@ -484,6 +561,13 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
             "p95_verification_rollouts": _quantile(verification_rollouts, 0.95),
             "max_verification_rollouts": max(verification_rollouts, default=0.0),
             "mean_adaptive_rounds": _mean(adaptive_rounds),
+            "mean_candidate_pool_size": _mean(pool_sizes),
+            "mean_verified_candidate_count": _mean(verified_candidate_counts),
+            "safe_template_coverage_rate": safe_template_coverage_rate,
+            "greedy_selectable_rate": greedy_selectable_rate,
+            "selected_source_counts": dict(sorted(selection_source_counts.items())),
+            "mean_one_step_grid_oracle_regret": _mean(oracle_regrets),
+            "p95_one_step_grid_oracle_regret": _quantile(oracle_regrets, 0.95),
         },
         "distillation_targets": {
             "valid_rate": target_valid_rate,

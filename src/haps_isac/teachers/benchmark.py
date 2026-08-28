@@ -142,6 +142,7 @@ def benchmark_teacher(
             snapshot.state_id,
             teacher_config.prompt_version,
             teacher_config.num_candidates,
+            teacher_config.verification,
         )
         sampling_seed = common_rollout_seeds(
             f"{snapshot.state_id}:teacher",
