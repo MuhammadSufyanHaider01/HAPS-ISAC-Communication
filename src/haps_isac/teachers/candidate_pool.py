@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -12,7 +13,11 @@ from haps_isac.control.action_schema import HighLevelAction
 from haps_isac.control.action_transform import action_from_mapping
 from haps_isac.teachers.base_teacher import CandidatePoolConfig
 from haps_isac.teachers.prompt_builder import PromptArtifact
-from haps_isac.teachers.response_parser import ParsedCandidate, ParsedTeacherResponse
+from haps_isac.teachers.response_parser import (
+    ParsedCandidate,
+    ParsedTeacherResponse,
+    TeacherResponseError,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,11 +71,110 @@ def _safe_template_candidates(
                     reason_codes=("deterministic_safe_template", template_id),
                     confidence=0.0,
                     canonical_key=canonical_action_key(action),
+                    template_id=template_id,
                     source="safe_template",
                     source_label=f"{template_id}:cpu={cpu:.3f}",
                 )
             )
     return tuple(candidates)
+
+
+def _template_lookup(artifact: PromptArtifact) -> dict[str, dict[str, Any]]:
+    templates = (artifact.sensing_only_template, *artifact.sic_safe_templates)
+    return {str(template["template_id"]): template for template in templates}
+
+
+def _template_base_matches(action: HighLevelAction, template: dict[str, Any]) -> bool:
+    return (
+        action.pair == int(template["pair"])
+        and abs(action.eta_haps - float(template["eta_haps"])) <= 1.5e-6
+        and abs(action.eta_communication - float(template["eta_communication"])) <= 1.5e-6
+    )
+
+
+def _resolve_template_id(
+    candidate: ParsedCandidate,
+    templates: dict[str, dict[str, Any]],
+) -> str | None:
+    raw_id = (candidate.template_id or "").strip()
+    if raw_id in templates:
+        return raw_id
+    for reason in candidate.reason_codes:
+        if reason in templates:
+            return reason
+    normalized = raw_id.lower().replace("-", "_").replace(" ", "_")
+    for template_id in sorted(templates, key=len, reverse=True):
+        if normalized.startswith(template_id.lower() + "_"):
+            return template_id
+    for reason in candidate.reason_codes:
+        normalized_reason = reason.lower().replace("-", "_").replace(" ", "_")
+        for template_id in sorted(templates, key=len, reverse=True):
+            if normalized_reason.startswith(template_id.lower() + "_"):
+                return template_id
+    matches = [
+        template_id
+        for template_id, template in templates.items()
+        if _template_base_matches(candidate.action, template)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def canonicalize_teacher_response(
+    parsed: ParsedTeacherResponse,
+    artifact: PromptArtifact,
+) -> ParsedTeacherResponse:
+    """Project teacher refinements onto the exact per-state template bank.
+
+    ``template_id`` is authoritative for pair and fixed physical controls. Known
+    aliases from older model behavior are resolved using the explicit id, reason
+    codes, or an unambiguous numeric template match; the raw response remains in
+    the request log for audit.
+    """
+
+    templates = _template_lookup(artifact)
+    canonical_candidates: list[ParsedCandidate] = []
+    for candidate in parsed.candidates:
+        template_id = _resolve_template_id(candidate, templates)
+        if template_id is None:
+            raise TeacherResponseError(
+                f"candidate {candidate.candidate_index} has no resolvable template_id"
+            )
+        template = templates[template_id]
+        default_near = float(template["eta_near"]) if "eta_near" in template else 0.0
+        maximum_near = float(template.get("maximum_eta_near", default_near))
+        eta_near = (
+            default_near
+            if int(template["pair"]) == 0
+            else min(float(candidate.action.eta_near), maximum_near)
+        )
+        action = HighLevelAction(
+            pair=int(template["pair"]),
+            ris_code=0,
+            eta_haps=float(template["eta_haps"]),
+            eta_communication=float(template["eta_communication"]),
+            eta_near=eta_near,
+            eta_jamming=0.0,
+            aav_heading_rad=0.0,
+            aav_speed_fraction=0.0,
+            eta_cpu=float(candidate.action.eta_cpu),
+        )
+        canonical_candidates.append(
+            ParsedCandidate(
+                candidate_index=candidate.candidate_index,
+                action=action,
+                reason_codes=candidate.reason_codes,
+                confidence=candidate.confidence,
+                canonical_key=canonical_action_key(action),
+                template_id=template_id,
+                source=candidate.source,
+                source_label=candidate.source_label,
+            )
+        )
+    return ParsedTeacherResponse(
+        schema_version=parsed.schema_version,
+        state_id=parsed.state_id,
+        candidates=tuple(canonical_candidates),
+    )
 
 
 def build_candidate_pool(
@@ -100,6 +204,7 @@ def build_candidate_pool(
                     reason_codes=candidate.reason_codes,
                     confidence=candidate.confidence,
                     canonical_key=candidate.canonical_key,
+                    template_id=candidate.template_id,
                     source=candidate.source,
                     source_label=candidate.source_label,
                 )
@@ -117,6 +222,7 @@ def build_candidate_pool(
             reason_codes=("greedy_selectable_baseline",),
             confidence=0.0,
             canonical_key=canonical_action_key(greedy_action),
+            template_id=None,
             source="greedy_baseline",
             source_label="urgency_greedy",
         )
@@ -141,17 +247,14 @@ def template_compliance(
     candidate: ParsedCandidate,
     artifact: PromptArtifact,
 ) -> tuple[str | None, bool | None]:
-    """Return referenced template ID and exact Version-1 template compliance."""
+    """Return the canonical template ID and exact Version-1 compliance."""
 
-    if candidate.source == "greedy_baseline":
+    if candidate.source in {"greedy_baseline", "random_baseline"}:
         return None, None
-    templates = {
-        str(template["template_id"]): template
-        for template in (artifact.sensing_only_template, *artifact.sic_safe_templates)
-    }
-    template_id = next((code for code in candidate.reason_codes if code in templates), None)
-    if template_id is None:
-        return None, False
+    templates = _template_lookup(artifact)
+    template_id = candidate.template_id
+    if template_id is None or template_id not in templates:
+        return template_id, False
     template = templates[template_id]
     action = candidate.action
     tolerance = 1.5e-6
@@ -168,5 +271,5 @@ def template_compliance(
         and abs(action.aav_speed_fraction) <= tolerance
     )
     if int(template["pair"]) == 0:
-        matches = matches and abs(action.eta_near - float(template["eta_near"])) <= tolerance
+        matches = matches and abs(action.eta_near - default_near) <= tolerance
     return template_id, matches

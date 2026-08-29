@@ -4,7 +4,7 @@ model_id: Qwen/Qwen3.5-27B
 model_revision: fc05daec18b0a78c049392ed2e771dde82bdf654
 base_url: http://127.0.0.1:8000/v1
 api_key_env: HAPS_TEACHER_API_KEY
-prompt_version: "2.0"
+prompt_version: "2.1"
 num_candidates: 8
 request_timeout_s: 600.0
 max_retries: 3

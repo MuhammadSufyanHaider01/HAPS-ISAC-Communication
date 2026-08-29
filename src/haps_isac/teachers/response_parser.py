@@ -14,17 +14,22 @@ from haps_isac.control.action_schema import HighLevelAction
 class CandidatePayload(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    pair: int = Field(ge=0)
-    ris_code: int = 0
-    eta_haps: float = Field(ge=0.0, le=1.0)
-    eta_communication: float = Field(ge=0.0, le=1.0)
+    template_id: str = Field(min_length=1, max_length=64)
     eta_near: float = Field(ge=0.0, le=0.5)
-    eta_jamming: float = Field(ge=0.0, le=1.0)
-    aav_heading_rad: float = Field(ge=-3.141592653589793, le=3.141592653589793)
-    aav_speed_fraction: float = Field(ge=0.0, le=1.0)
     eta_cpu: float = Field(ge=0.0, le=1.0)
     reason_codes: tuple[str, ...] = Field(default=(), max_length=12)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Accepted for transport compatibility; canonicalization ignores these
+    # template-controlled values and reconstructs them from ``template_id``.
+    pair: int | None = Field(default=None, ge=0)
+    ris_code: int | None = Field(default=None, ge=0)
+    eta_haps: float | None = Field(default=None, ge=0.0, le=1.0)
+    eta_communication: float | None = Field(default=None, ge=0.0, le=1.0)
+    eta_jamming: float | None = Field(default=None, ge=0.0, le=1.0)
+    aav_heading_rad: float | None = Field(
+        default=None, ge=-3.141592653589793, le=3.141592653589793
+    )
+    aav_speed_fraction: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class ResponsePayload(BaseModel):
@@ -42,6 +47,7 @@ class ParsedCandidate:
     reason_codes: tuple[str, ...]
     confidence: float
     canonical_key: tuple[int | float, ...]
+    template_id: str | None = None
     source: str = "teacher"
     source_label: str = "teacher_response"
 
@@ -100,19 +106,18 @@ def parse_teacher_response(
             f"expected {expected_candidates} candidates, received {len(payload.candidates)}"
         )
 
+    _ = num_pairs  # retained in the public API for caller compatibility
     parsed: list[ParsedCandidate] = []
     for index, item in enumerate(payload.candidates):
-        if item.pair > num_pairs:
-            raise TeacherResponseError(f"candidate {index} has an invalid pair")
         action = HighLevelAction(
-            pair=item.pair,
-            ris_code=item.ris_code,
-            eta_haps=item.eta_haps,
-            eta_communication=item.eta_communication,
+            pair=0,
+            ris_code=0,
+            eta_haps=0.0,
+            eta_communication=0.0,
             eta_near=item.eta_near,
-            eta_jamming=item.eta_jamming,
-            aav_heading_rad=item.aav_heading_rad,
-            aav_speed_fraction=item.aav_speed_fraction,
+            eta_jamming=0.0,
+            aav_heading_rad=0.0,
+            aav_speed_fraction=0.0,
             eta_cpu=item.eta_cpu,
         )
         canonical = (
@@ -127,6 +132,7 @@ def parse_teacher_response(
                 reason_codes=item.reason_codes,
                 confidence=item.confidence,
                 canonical_key=canonical,
+                template_id=item.template_id,
             )
         )
     return ParsedTeacherResponse(

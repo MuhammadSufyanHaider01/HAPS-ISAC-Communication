@@ -28,6 +28,7 @@ from haps_isac.teachers.base_teacher import (
     load_teacher_config,
 )
 from haps_isac.teachers.benchmark import run_tournament
+from haps_isac.teachers.candidate_pool import canonicalize_teacher_response
 from haps_isac.teachers.prompt_builder import build_teacher_prompt
 from haps_isac.teachers.query_cache import QueryCache, cache_key_for
 from haps_isac.teachers.qwen_teacher import (
@@ -51,14 +52,8 @@ from haps_isac.verification.rollout_verifier import (
 def _mock_response(state_id: str, count: int, pairs: int) -> str:
     candidates = [
         {
-            "pair": 1 + index % pairs,
-            "ris_code": 0,
-            "eta_haps": 0.7 + 0.02 * index,
-            "eta_communication": 0.7,
+            "template_id": "p1_sense2w",
             "eta_near": 0.1 + 0.02 * index,
-            "eta_jamming": 0.0,
-            "aav_heading_rad": 0.0,
-            "aav_speed_fraction": 0.0,
             "eta_cpu": 0.6,
             "reason_codes": ["unit_test"],
             "confidence": 0.5,
@@ -113,7 +108,8 @@ def test_prompt_is_deterministic_and_causal() -> None:
     assert first == second
     assert "target_true_state" not in first.prompt
     assert "haps_ue_true" not in first.prompt
-    assert "every candidate MUST set the exact values ris_code=0" in first.prompt
+    assert "template_id" in first.prompt
+    assert "free refinements eta_near and eta_cpu" in first.prompt
     assert "optimization_contract" in first.prompt
     assert "near_aoi_fraction" in first.prompt
     assert "virtual_queue_transform" in first.prompt
@@ -142,22 +138,17 @@ def test_prompt_is_deterministic_and_causal() -> None:
                 "state_id": f"template-{index}",
                 "candidates": [
                     {
-                        "pair": template["pair"],
-                        "ris_code": 0,
-                        "eta_haps": template["eta_haps"],
-                        "eta_communication": template["eta_communication"],
+                        "template_id": template["template_id"],
                         "eta_near": template["recommended_eta_near"],
-                        "eta_jamming": 0.0,
-                        "aav_heading_rad": 0.0,
-                        "aav_speed_fraction": 0.0,
                         "eta_cpu": 0.5,
-                        "reason_codes": [template["template_id"]],
+                        "reason_codes": ["unit_test"],
                         "confidence": 1.0,
                     }
                 ],
             }
         )
         parsed = parse_teacher_response(raw, f"template-{index}", 1, 4)
+        parsed = canonicalize_teacher_response(parsed, first)
         evaluation = evaluate_one_step(
             env,
             env.state,
@@ -173,22 +164,17 @@ def test_prompt_is_deterministic_and_causal() -> None:
             "state_id": "sensing-template",
             "candidates": [
                 {
-                    "pair": sensing_only["pair"],
-                    "ris_code": 0,
-                    "eta_haps": sensing_only["eta_haps"],
-                    "eta_communication": sensing_only["eta_communication"],
+                    "template_id": sensing_only["template_id"],
                     "eta_near": sensing_only["eta_near"],
-                    "eta_jamming": 0.0,
-                    "aav_heading_rad": 0.0,
-                    "aav_speed_fraction": 0.0,
                     "eta_cpu": 0.5,
-                    "reason_codes": [sensing_only["template_id"]],
+                    "reason_codes": ["unit_test"],
                     "confidence": 1.0,
                 }
             ],
         }
     )
     sensing_parsed = parse_teacher_response(sensing_raw, "sensing-template", 1, 4)
+    sensing_parsed = canonicalize_teacher_response(sensing_parsed, first)
     sensing_evaluation = evaluate_one_step(
         env,
         env.state,
@@ -197,6 +183,39 @@ def test_prompt_is_deterministic_and_causal() -> None:
     )
     assert sensing_evaluation.pre_repair_feasible
     assert not sensing_evaluation.fallback_used
+
+
+def test_template_id_projection_reconstructs_fixed_controls() -> None:
+    config = load_config("configs/system_v1.yaml")
+    env = HapsIsacEnv(config)
+    observation, _ = env.reset(seed=13)
+    prompt = build_teacher_prompt(config, observation, env.state, "state-template", "2.1", 1)
+    raw = json.dumps(
+        {
+            "schema_version": 1,
+            "state_id": "state-template",
+            "candidates": [
+                {
+                    "template_id": "p1_sense2w_max_near",
+                    "eta_near": 0.5,
+                    "eta_cpu": 0.7,
+                    "reason_codes": ["secrecy_priority"],
+                    "confidence": 0.8,
+                }
+            ],
+        }
+    )
+    parsed = canonicalize_teacher_response(
+        parse_teacher_response(raw, "state-template", 1, 4),
+        prompt,
+    )
+    candidate = parsed.candidates[0]
+    assert candidate.template_id == "p1_sense2w"
+    assert candidate.action.pair == 1
+    assert candidate.action.eta_haps == prompt.sic_safe_templates[0]["eta_haps"]
+    assert candidate.action.eta_communication == prompt.sic_safe_templates[0]["eta_communication"]
+    assert candidate.action.eta_near <= prompt.sic_safe_templates[0]["maximum_eta_near"]
+    assert candidate.action.eta_cpu == 0.7
 
 
 def test_response_parser_enforces_identity_count_and_bounds() -> None:
@@ -271,6 +290,7 @@ def test_common_random_rollouts_are_reproducible() -> None:
         TeacherRequest("request-a", "state-a", prompt.prompt, prompt.prompt_hash, 3)
     )
     parsed = parse_teacher_response(raw.raw_text, "state-a", 4, 4)
+    parsed = canonicalize_teacher_response(parsed, prompt)
     seeds = common_rollout_seeds("state-a", 123, 2)
     assert seeds == common_rollout_seeds("state-a", 123, 2)
     assert seeds != common_rollout_seeds("state-b", 123, 2)

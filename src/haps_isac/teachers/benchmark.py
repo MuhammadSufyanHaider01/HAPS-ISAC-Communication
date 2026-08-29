@@ -16,6 +16,7 @@ from haps_isac.teachers.base_teacher import (
     TeacherConfig,
     TeacherRequest,
 )
+from haps_isac.teachers.candidate_pool import canonicalize_teacher_response
 from haps_isac.teachers.gemma_teacher import GemmaTeacher
 from haps_isac.teachers.prompt_builder import build_teacher_prompt
 from haps_isac.teachers.query_cache import QueryCache
@@ -187,6 +188,7 @@ def benchmark_teacher(
                 teacher_config.num_candidates,
                 system_config.system.num_noma_pairs,
             )
+            parsed = canonicalize_teacher_response(parsed, prompt)
         except TeacherResponseError as error:
             records.append(
                 TeacherStateBenchmark(

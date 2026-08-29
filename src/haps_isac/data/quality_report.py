@@ -45,6 +45,7 @@ SCALE_UP_THRESHOLDS = {
     "selected_vs_random_verified_win_rate": (">=", 0.55),
     "mean_greedy_minus_selected_verified_risk": (">=", 0.0),
     "mean_random_minus_selected_verified_risk": (">=", 0.0),
+    "teacher_target_weight_share": (">=", 0.10),
 }
 
 
@@ -461,6 +462,47 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
         str(selection.get("selected_candidate_source", "unknown"))
         for selection in accepted_selections
     )
+    candidate_source_lookup = {
+        (str(candidate.get("state_id")), int(candidate.get("candidate_index", -1))): str(
+            candidate.get("candidate_source", "teacher")
+        )
+        for candidate in candidates
+    }
+    teacher_target_weight = 0.0
+    target_weight_total = 0.0
+    teacher_target_state_count = 0
+    for demonstration in demonstrations:
+        state_id = str(demonstration.get("state_id"))
+        targets = demonstration.get("target_candidates") or []
+        state_has_teacher_target = False
+        for target in targets:
+            try:
+                candidate_index = int(target.get("candidate_index", -1))
+                weight = float(target.get("weight", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(weight) or weight < 0.0:
+                continue
+            target_weight_total += weight
+            source = candidate_source_lookup.get(
+                (state_id, candidate_index),
+                "teacher" if schema_version < 5 else "unknown",
+            )
+            if source == "teacher":
+                teacher_target_weight += weight
+                state_has_teacher_target = True
+        teacher_target_state_count += int(state_has_teacher_target)
+    teacher_target_weight_share = (
+        teacher_target_weight / target_weight_total if target_weight_total > 0.0 else 0.0
+    )
+    teacher_target_state_rate = (
+        teacher_target_state_count / len(demonstrations) if demonstrations else 0.0
+    )
+    teacher_selected_rate = (
+        selection_source_counts["teacher"] / len(accepted_selections)
+        if accepted_selections
+        else 0.0
+    )
     pool_sizes = [
         float(selection.get("candidate_pool_count", 0)) for selection in accepted_selections
     ]
@@ -509,6 +551,7 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
         "mean_random_minus_selected_verified_risk": baseline_comparison[
             "mean_random_minus_selected_verified_risk"
         ],
+        "teacher_target_weight_share": teacher_target_weight_share,
     }
 
     gates: dict[str, dict[str, Any]] = {}
@@ -566,17 +609,30 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
             "safe_template_coverage_rate": safe_template_coverage_rate,
             "greedy_selectable_rate": greedy_selectable_rate,
             "selected_source_counts": dict(sorted(selection_source_counts.items())),
+            "teacher_selected_rate": teacher_selected_rate,
+            "teacher_target_weight_share": teacher_target_weight_share,
+            "teacher_target_state_rate": teacher_target_state_rate,
             "mean_one_step_grid_oracle_regret": _mean(oracle_regrets),
             "p95_one_step_grid_oracle_regret": _quantile(oracle_regrets, 0.95),
         },
         "distillation_targets": {
             "valid_rate": target_valid_rate,
+            "teacher_target_weight_share": teacher_target_weight_share,
+            "teacher_target_state_rate": teacher_target_state_rate,
             "mean_candidates_per_state": _mean(
                 [float(len(record.get("target_candidates") or [None])) for record in demonstrations]
             ),
             "mean_entropy": _mean(
                 [float(record.get("target_entropy", 0.0)) for record in demonstrations]
             ),
+        },
+        "teacher_contribution": {
+            "target_weight": teacher_target_weight,
+            "target_weight_total": target_weight_total,
+            "target_weight_share": teacher_target_weight_share,
+            "target_state_count": teacher_target_state_count,
+            "target_state_rate": teacher_target_state_rate,
+            "selected_rate": teacher_selected_rate,
         },
         "sampling_quality": {
             "duplicate_causal_state_count": duplicate_state_count,

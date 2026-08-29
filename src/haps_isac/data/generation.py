@@ -48,6 +48,7 @@ from haps_isac.teachers.base_teacher import (
 from haps_isac.teachers.candidate_pool import (
     build_candidate_pool,
     canonical_action_key,
+    canonicalize_teacher_response,
     template_compliance,
 )
 from haps_isac.teachers.gemma_teacher import GemmaTeacher
@@ -962,6 +963,7 @@ def generate_demonstrations(
                         teacher_config.num_candidates,
                         system_config.system.num_noma_pairs,
                     )
+                    parsed = canonicalize_teacher_response(parsed, prompt)
                 except TeacherResponseError as error:
                     parse_error = str(error)
             if parsed is None:

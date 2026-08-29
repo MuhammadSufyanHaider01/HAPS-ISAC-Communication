@@ -347,18 +347,10 @@ class MockTeacher(BaseTeacher):
     def generate(self, request: TeacherRequest) -> TeacherCallResult:
         candidates: list[dict[str, Any]] = []
         for index in range(self.config.num_candidates):
-            pair = 1 + ((request.seed + index) % self.num_pairs)
-            sensing_fraction = 0.2 + 0.05 * (index % 5)
             candidates.append(
                 {
-                    "pair": pair,
-                    "ris_code": 0,
-                    "eta_haps": min(1.0, 0.65 + 0.04 * index),
-                    "eta_communication": 1.0 - sensing_fraction,
+                    "template_id": "p1_sense2w",
                     "eta_near": 0.1 + 0.04 * (index % 5),
-                    "eta_jamming": 0.0,
-                    "aav_heading_rad": 0.0,
-                    "aav_speed_fraction": 0.0,
                     "eta_cpu": 0.5 + 0.05 * (index % 6),
                     "reason_codes": ["mock_diverse_candidate"],
                     "confidence": 0.5,
