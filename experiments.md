@@ -100,6 +100,69 @@ Primary system-level metrics are AoI, AoLI, AoSI, secrecy rate/outage, sensing a
 
 Every main comparison should report confidence intervals across independent seeds and held-out episodes. Runtime, peak memory, trainable parameter count, and end-to-end per-slot latency should be included for the teacher and student comparisons.
 
+## Training-Convergence Diagnostics
+
+Optionally log and plot the total distillation loss during offline student training, together with its categorical, continuous-action, value, constraint, and auxiliary components when available. Report training and held-out validation curves, the step/epoch of the best checkpoint, and whether loss convergence corresponds to improved verified system-level performance and feasibility. These curves are convergence diagnostics, not substitutes for AoI, AoLI, AoSI, secrecy, sensing, energy, and constraint results.
+
+## Core Wireless Knowledge-Creation Experiments
+
+The central paper figures should establish physical-layer and cross-layer operating principles, rather than only rank learning algorithms. Use an exhaustive or strong model-based reference on small instances to validate each physical effect, then show that the proposed student reproduces it at deployment scale. The student is the scalable controller; the wireless-system insight is the contribution.
+
+### 1. NOMA versus OMA Operating-Region Map (Highest Priority)
+
+Study when power-domain NOMA is preferable to OMA for secure, freshness-aware HAPS-ISAC control. Compare NOMA and OMA under the same time-bandwidth, power, sensing, completion, and safety constraints; add semi-NOMA if a fair implementation is available.
+
+Vary jointly:
+
+- near/far cluster radial geometry and channel-gain disparity;
+- offered update load and cluster traffic imbalance;
+- spatial separation between clusters; and
+- residual SIC and CSI error after Version 2 imperfections are enabled.
+
+Report a two-dimensional operating-region map showing the preferred access mode, 95th-percentile AoLI/AoSI, secrecy-outage probability, tracking error, and feasibility. The intended output is an empirically verified NOMA-viability boundary, not a predetermined claim that NOMA always wins.
+
+Prerequisite: add a comparable OMA control path to the simulator/action-completion layer before final student training.
+
+### 2. Sensing-Secrecy-Tracking Geometry Map
+
+Study the coupling between sensing effort, target tracking, and physical-layer secrecy while keeping the total resource budget fixed.
+
+Vary:
+
+- target motion/process noise or tracking difficulty;
+- target-to-eavesdropper angular or spatial separation; and
+- legitimate-cluster/eavesdropper geometry.
+
+Report tracking RMSE or covariance trace, secrecy rate/outage, AoLI/AoSI, energy, and the sensing-versus-communication allocation. The desired result is a geometry-dependent map that identifies when extra sensing improves mission freshness through better estimation and when it causes an unacceptable secrecy cost.
+
+### 3. Cross-Layer Freshness Bottleneck Map
+
+Study whether stale information is dominated by radio service, sensing/estimation, or CPU-delayed estimate availability. Jointly vary offered update load, CPU service delay/capacity, and radio quality.
+
+Report tail AoLI/AoSI, virtual-queue stability, energy, tracking uncertainty, and the marginal benefit of additional radio versus computing resources. Classify each operating point as radio-limited, compute-limited, or sensing-limited; a key result is the regime where additional transmit power cannot improve AoLI because computing delay is dominant.
+
+### 4. HAPS Freshness-Security Feasibility Region
+
+Construct an empirical service/feasibility region by jointly varying offered update load and a HAPS provisioning dimension, such as coverage radius, transmit-power budget, or computing capacity. Use secrecy/reliability requirements as separate panels or constraints.
+
+For every operating point, report bounded virtual queues, hard-feasibility, and tail freshness/security targets. Compare the proposed controller with the strongest model-based and RL references. Describe this as an empirical stable-feasible region, not as an information-theoretic capacity region unless it is analytically derived. The map should yield deployment guidance for meeting a stated freshness and secrecy service-level agreement.
+
+### 5. Version 2 Robustness Boundary (Future Extension)
+
+After imperfect CSI, residual SIC, blockage, or mobility is enabled, map the boundary over CSI error and interference/blockage severity. Report tail freshness, secrecy outage, feasibility, repair distance, and fallback frequency to identify where nominal NOMA-ISAC control becomes unreliable.
+
+## Supporting Algorithmic Experiments
+
+These studies are important evidence for the teacher-to-student method, but are secondary to the wireless knowledge-creation experiments above.
+
+### 1. Distillation versus Reinforcement Learning
+
+Compare PPO from scratch, quality-weighted distillation, and distillation followed by constrained PPO using the same policy interface, safety layer, scenario split, and environment-interaction budget. Report verified system performance against training interactions, teacher-data budget, convergence behavior, and constraint outcomes. This isolates the value of verified teacher supervision and PPO refinement.
+
+### 2. Deployment Efficiency
+
+Compare direct Qwen teacher control, the strongest model-based optimizer, the Gemma student, and the optional numerical-only policy. Report end-to-end per-slot p50/p95 latency, memory, trainable and total parameter counts, throughput, deadline-miss rate, and verified system performance. Present this as a performance-latency-memory Pareto result.
+
 ## Planned Main Comparison Table
 
 The initial main table is expected to contain:
