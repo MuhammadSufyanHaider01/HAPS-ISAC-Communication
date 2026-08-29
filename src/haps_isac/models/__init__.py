@@ -1,1 +1,1 @@
-"""Numerical student actor, value critic, and constraint critics."""
+"""Gemma PEFT student heads, optional numerical actor, and constraint critics."""

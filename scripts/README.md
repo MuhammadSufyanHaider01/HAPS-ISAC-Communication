@@ -12,7 +12,7 @@ Implemented and tested:
 
 Reserved for later phases:
 
-- `train_student.py`
+- `train_student.py` (Gemma 4 E4B action distillation with QLoRA/LoRA adapters)
 - `collect_active_queries.py`
 - `train_constrained_ppo.py`
 - `evaluate_all.py`

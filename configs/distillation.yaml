@@ -7,3 +7,29 @@ max_epochs: 200
 gradient_clip_norm: 1.0
 early_stopping_patience: 20
 categorical_label_smoothing: 0.02
+
+# Primary 4B-class student. E4B is approximately 4.5B effective parameters
+# (about 8B total including embeddings), not exactly 4B total.
+student:
+  model_family: gemma4
+  model_id: google/gemma-4-E4B-it
+  model_revision: main  # pin an immutable commit before dataset generation
+  parameter_class: "4.5B effective (~8B including embeddings)"
+  input_mode: causal_state_text
+  output_mode: structured_hybrid_action_head
+  max_sequence_length: 4096
+  train_action_head: true
+
+# Only adapters and newly initialized heads are updated during distillation.
+peft:
+  method: qlora
+  quantization: nf4
+  load_in_4bit: true
+  compute_dtype: bfloat16
+  freeze_base_model: true
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  gradient_checkpointing: true
+  fallback_method: lora

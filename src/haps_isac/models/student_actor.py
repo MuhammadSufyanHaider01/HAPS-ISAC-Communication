@@ -1,1 +1,1 @@
-"""Set/attention-based hybrid-action student policy."""
+"""Gemma PEFT hybrid-action student policy and optional numerical baseline."""
