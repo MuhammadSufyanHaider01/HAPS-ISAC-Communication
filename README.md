@@ -15,6 +15,7 @@ Version 2 components—RIS, AAV jamming and mobility, residual self-interference
 - [System and signal model](HAPS_ISAC_Freshness_System_Model.pdf)
 - [Verified reasoning-distillation specification](Verified_Reasoning_Distillation_HAPS_ISAC.pdf)
 - [Implementation plan](plan.md)
+- [Experiment plan and baseline record](experiments.md)
 
 ## Planned pipeline
 
