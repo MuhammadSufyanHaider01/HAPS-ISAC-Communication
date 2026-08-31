@@ -24,8 +24,10 @@ ACTION_FIELDS = (
 
 SCALE_UP_THRESHOLDS = {
     "request_schema_valid_rate": (">=", 0.99),
+    "request_normalization_rate": ("<=", 0.05),
     "candidate_unique_ratio": (">=", 0.75),
     "teacher_template_compliance_rate": (">=", 0.95),
+    "teacher_template_resolution_repair_rate": ("<=", 0.05),
     "safe_template_coverage_rate": (">=", 1.0),
     "greedy_selectable_rate": (">=", 1.0),
     "executed_candidate_unique_ratio": (">=", 0.75),
@@ -419,6 +421,23 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
             for candidate in teacher_candidates
         ]
     )
+    request_normalization_rate = _mean(
+        [float(bool(record.get("response_normalization_notes"))) for record in requests]
+    )
+    normalization_note_counts = Counter(
+        str(note)
+        for record in requests
+        for note in (record.get("response_normalization_notes") or [])
+    )
+    template_resolution_counts = Counter(
+        str(candidate.get("template_resolution", "exact")) for candidate in teacher_candidates
+    )
+    teacher_template_resolution_repair_rate = _mean(
+        [
+            float(str(candidate.get("template_resolution", "exact")) != "exact")
+            for candidate in teacher_candidates
+        ]
+    )
     accepted_selections = [
         selection for selection in selections if selection["acceptance_status"] == "accepted"
     ]
@@ -516,9 +535,11 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
     ]
     metrics = {
         "request_schema_valid_rate": request_schema_valid_rate,
+        "request_normalization_rate": request_normalization_rate,
         "candidate_unique_ratio": candidate_unique_ratio,
         "candidate_role_compliance_rate": candidate_role_compliance_rate,
         "teacher_template_compliance_rate": teacher_template_compliance_rate,
+        "teacher_template_resolution_repair_rate": teacher_template_resolution_repair_rate,
         "safe_template_coverage_rate": safe_template_coverage_rate,
         "greedy_selectable_rate": greedy_selectable_rate,
         "executed_candidate_unique_ratio": action_diversity["mean_executed_unique_ratio"],
@@ -590,6 +611,13 @@ def build_teacher_quality_report(directory: str | Path) -> dict[str, Any]:
         "action_diversity": action_diversity,
         "candidate_role_compliance_rate": candidate_role_compliance_rate,
         "teacher_template_compliance_rate": teacher_template_compliance_rate,
+        "teacher_format": {
+            "request_normalization_rate": request_normalization_rate,
+            "normalization_note_counts": dict(sorted(normalization_note_counts.items())),
+            "template_resolution_counts": dict(sorted(template_resolution_counts.items())),
+            "template_resolution_repair_rate": teacher_template_resolution_repair_rate,
+        },
+        "metrics": metrics,
         "selection_quality": {
             "accepted_count": len(accepted_selections),
             "uncertain_rate": selection_uncertain_rate,

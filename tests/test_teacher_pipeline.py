@@ -109,6 +109,7 @@ def test_prompt_is_deterministic_and_causal() -> None:
     assert "target_true_state" not in first.prompt
     assert "haps_ue_true" not in first.prompt
     assert "template_id" in first.prompt
+    assert "valid_template_ids" in first.prompt
     assert "free refinements eta_near and eta_cpu" in first.prompt
     assert "optimization_contract" in first.prompt
     assert "near_aoi_fraction" in first.prompt
@@ -231,6 +232,115 @@ def test_response_parser_enforces_identity_count_and_bounds() -> None:
     invalid["candidates"][0]["eta_near"] = 0.9
     with pytest.raises(TeacherResponseError):
         parse_teacher_response(json.dumps(invalid), "s", 4, 4)
+
+
+def test_response_parser_normalizes_only_observed_provider_aliases() -> None:
+    payload = json.loads(_mock_response("s", 1, 4))
+    candidate = payload["candidates"][0]
+    candidate.pop("template_id")
+    candidate["template_id_actual"] = "p2_sense10w"
+    candidate["reason_codes"] = "provider emitted a scalar explanation"
+    candidate["reason_codes_override"] = "provider correction metadata"
+    parsed = parse_teacher_response(json.dumps(payload), "s", 1, 4)
+    assert parsed.candidates[0].template_id == "p2_sense10w"
+    assert parsed.candidates[0].template_id_raw is None
+    assert parsed.candidates[0].reason_codes == ("provider emitted a scalar explanation",)
+    assert parsed.normalization_notes == (
+        "candidate[0].template_id_actual->template_id",
+        "candidate[0].reason_codes_string_to_array",
+        "candidate[0].reason_codes_override_removed",
+    )
+
+    too_many_reasons = json.loads(_mock_response("s", 1, 4))
+    too_many_reasons["candidates"][0]["reason_codes"] = ["a", "b", "c", "d"]
+    with pytest.raises(TeacherResponseError):
+        parse_teacher_response(json.dumps(too_many_reasons), "s", 1, 4)
+
+
+def test_template_id_actual_correction_wins_conflicting_provider_fields() -> None:
+    config = load_config("configs/system_v1.yaml")
+    env = HapsIsacEnv(config)
+    observation, _ = env.reset(seed=13)
+    prompt = build_teacher_prompt(config, observation, env.state, "state-correction", "2.2", 1)
+    raw = json.dumps(
+        {
+            "schema_version": 1,
+            "state_id": "state-correction",
+            "candidates": [
+                {
+                    "template_id": "p2_sense10w",
+                    "template_id_actual": "p1_sense18w",
+                    "eta_near": 0.2,
+                    "eta_cpu": 0.5,
+                    "reason_codes": "corrected by provider",
+                    "confidence": 0.75,
+                }
+            ],
+        }
+    )
+    parsed = canonicalize_teacher_response(
+        parse_teacher_response(raw, "state-correction", 1, 4),
+        prompt,
+    )
+    candidate = parsed.candidates[0]
+    assert candidate.template_id == "p1_sense18w"
+    assert candidate.template_id_raw == "p2_sense10w"
+    assert candidate.template_resolution == "normalized_template_id"
+    assert "candidate[0].template_id_conflict_prefer_actual" in parsed.normalization_notes
+
+
+def test_template_id_nearest_repair_is_same_pair_and_logged() -> None:
+    config = load_config("configs/system_v1.yaml")
+    env = HapsIsacEnv(config)
+    observation, _ = env.reset(seed=13)
+    prompt = build_teacher_prompt(config, observation, env.state, "state-nearest", "2.2", 1)
+    prompt = replace(
+        prompt,
+        sic_safe_templates=tuple(
+            template
+            for template in prompt.sic_safe_templates
+            if template["template_id"] != "p1_sense18w"
+        ),
+    )
+    raw = json.dumps(
+        {
+            "schema_version": 1,
+            "state_id": "state-nearest",
+            "candidates": [
+                {
+                    "template_id": "p1_sense18w",
+                    "eta_near": 0.2,
+                    "eta_cpu": 0.5,
+                    "reason_codes": ["unit_test"],
+                    "confidence": 0.75,
+                }
+            ],
+        }
+    )
+    parsed = canonicalize_teacher_response(
+        parse_teacher_response(raw, "state-nearest", 1, 4),
+        prompt,
+    )
+    candidate = parsed.candidates[0]
+    assert candidate.template_id == "p1_sense10w"
+    assert candidate.template_id_raw == "p1_sense18w"
+    assert candidate.template_resolution == "nearest_available_template"
+    assert candidate.action.pair == 1
+
+    unresolved = json.loads(raw)
+    unresolved["candidates"][0]["template_id"] = "p9_sense18w"
+    with pytest.raises(TeacherResponseError, match="no resolvable template_id"):
+        canonicalize_teacher_response(
+            parse_teacher_response(json.dumps(unresolved), "state-nearest", 1, 4),
+            prompt,
+        )
+    distant = json.loads(raw)
+    distant["candidates"][0]["template_id"] = "p1_sense100w"
+    with pytest.raises(TeacherResponseError, match="no resolvable template_id"):
+        canonicalize_teacher_response(
+            parse_teacher_response(json.dumps(distant), "state-nearest", 1, 4),
+            prompt,
+        )
 
 
 def test_teacher_request_id_is_forwarded_for_server_telemetry() -> None:
@@ -449,16 +559,58 @@ def test_mock_generation_writes_loadable_linked_tables(tmp_path: pytest.TempPath
     audit = audit_dataset(str(output))
     assert audit.passed
     assert audit.metrics["candidate_post_repair_hard_feasible_rate"] == 1.0
+    assert audit.metrics["request_normalization_rate"] == 0.0
+    assert audit.metrics["teacher_template_resolution_repair_rate"] == 0.0
     quality = build_teacher_quality_report(output)
     assert quality["counts"]["states"] == 2
     assert quality["baseline_comparison"]["compared_states"] == 2
     assert "eta_communication" in quality["action_field_changes"]
     assert quality["baseline_comparison"]["verified_compared_states"] == 2
     assert quality["scale_up_gates"]["request_schema_valid_rate"]["passed"]
+    assert quality["scale_up_gates"]["request_normalization_rate"]["passed"]
+    assert quality["scale_up_gates"]["teacher_template_resolution_repair_rate"]["passed"]
+    assert quality["teacher_format"]["template_resolution_repair_rate"] == 0.0
     assert quality["selection_quality"]["safe_template_coverage_rate"] == 1.0
     assert quality["baseline_comparison"]["selected_no_worse_than_greedy_verified_rate"] == 1.0
 
     assert quality["distillation_targets"]["valid_rate"] == 1.0
+
+
+def test_canonicalization_failure_rejects_request_without_placeholder_actions(
+    tmp_path: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "canonicalization-failure"  # type: ignore[operator]
+    system = load_config("configs/system_v1.yaml")
+    teacher = _fast_mock_teacher()
+
+    def fail_canonicalization(*_args: object, **_kwargs: object) -> object:
+        raise TeacherResponseError("candidate has no resolvable template_id")
+
+    monkeypatch.setattr(
+        generation_module,
+        "canonicalize_teacher_response",
+        fail_canonicalization,
+    )
+    manifest = generate_demonstrations(
+        system,
+        teacher,
+        "configs/system_v1.yaml",
+        "configs/teacher.yaml",
+        output,
+        requested_states=1,
+        master_seed=7,
+        run_id="canonicalization-failure",
+        export_parquet=False,
+    )
+    assert manifest.table_counts["teacher_requests"] == 1
+    assert manifest.table_counts["candidates"] == 0
+    assert manifest.table_counts["demonstrations"] == 0
+    request = json.loads((output / "teacher_requests.jsonl").read_text().splitlines()[0])
+    selection = json.loads((output / "selections.jsonl").read_text().splitlines()[0])
+    assert request["schema_valid"] is False
+    assert "no resolvable template_id" in request["error"]
+    assert selection["acceptance_status"] == "rejected"
 
 
 def test_tournament_uses_a_common_frozen_state_bank() -> None:

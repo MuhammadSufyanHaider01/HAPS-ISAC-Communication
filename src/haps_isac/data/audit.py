@@ -355,6 +355,23 @@ def audit_dataset(directory: str) -> DatasetAudit:
         if metric_candidates
         else 0.0
     )
+    request_normalization_rate = (
+        float(np.mean([bool(record.get("response_normalization_notes")) for record in requests]))
+        if requests
+        else 0.0
+    )
+    template_resolution_repair_rate = (
+        float(
+            np.mean(
+                [
+                    str(record.get("template_resolution", "exact")) != "exact"
+                    for record in metric_candidates
+                ]
+            )
+        )
+        if metric_candidates
+        else 0.0
+    )
     safe_template_coverage_rate = (
         float(
             np.mean(
@@ -379,9 +396,11 @@ def audit_dataset(directory: str) -> DatasetAudit:
 
     metrics = {
         "request_schema_valid_rate": parse_rate,
+        "request_normalization_rate": request_normalization_rate,
         "candidate_unique_ratio": unique_ratio,
         "candidate_role_compliance_rate": candidate_role_compliance_rate,
         "teacher_template_compliance_rate": template_compliance_rate,
+        "teacher_template_resolution_repair_rate": template_resolution_repair_rate,
         "safe_template_coverage_rate": safe_template_coverage_rate,
         "greedy_selectable_rate": greedy_selectable_rate,
         "executed_candidate_unique_ratio": executed_candidate_unique_ratio,
@@ -461,6 +480,10 @@ def audit_dataset(directory: str) -> DatasetAudit:
         warnings.append("teacher schema-valid rate is below 99%")
     if unique_ratio < 0.75:
         warnings.append("candidate uniqueness is below 75%")
+    if request_normalization_rate > 0.05:
+        warnings.append("more than 5% of teacher requests required response normalization")
+    if template_resolution_repair_rate > 0.05:
+        warnings.append("more than 5% of teacher candidates required template-id repair")
     if fallback_rate > 0.05:
         warnings.append("candidate fallback rate is above 5%")
     if metrics["candidate_p95_repair_distance"] > 0.25:

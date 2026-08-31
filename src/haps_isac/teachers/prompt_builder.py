@@ -394,9 +394,18 @@ def build_teacher_prompt(
     sensing_only_template = build_sensing_only_template(config)
     semantic_state_packet = build_semantic_state_packet(config, causal)
     optimization_contract = build_optimization_contract(config, verification)
+    valid_template_ids = [
+        str(sensing_only_template["template_id"]),
+        *(str(template["template_id"]) for template in sic_templates),
+    ]
     action_bank = {
         "sensing_only_template": sensing_only_template,
         "noma_templates": sic_templates,
+        "valid_template_ids": valid_template_ids,
+        "template_id_rule": (
+            "The only legal template_id values are the exact strings in valid_template_ids; "
+            "a template not listed for this state is unavailable and must not be emitted."
+        ),
         "deterministic_verifier_coverage": {
             "description": (
                 "Every listed template is independently added to the verifier pool at several "
@@ -432,18 +441,23 @@ def build_teacher_prompt(
         "supplied causal HAPS-ISAC state. The verifier minimizes the supplied "
         "risk-sensitive objective, so use the named state features, objective weights, "
         "long-term deficits, and rollout contract rather than treating vector positions "
-        "as anonymous numbers. For each candidate, choose template_id by copying one "
-        "exact string from action_bank: do not invent aliases, suffixes, or descriptions. "
-        "Return only the free refinements eta_near and eta_cpu; the verifier reconstructs "
-        "pair, eta_haps, eta_communication, ris_code, eta_jamming, heading, and speed "
-        "from template_id. For pair=0, eta_near is ignored and the sensing-only value is "
-        "used. For pair>0, eta_near must be in [0, maximum_eta_near] and eta_cpu in [0,1]. "
-        "Do not put template_id in reason_codes; reason_codes are short explanatory text. "
+        "as anonymous numbers. The legal template_id set for this request is exactly "
+        f"{json.dumps(valid_template_ids)}. Before emitting each candidate, check that its "
+        "template_id is an exact member of this list; never complete a missing pair/watt "
+        "combination from a pattern. If a preferred template is absent, choose another "
+        "listed template. Do not invent aliases, suffixes, or descriptions. Return only "
+        "the free refinements eta_near and eta_cpu; the verifier reconstructs pair, "
+        "eta_haps, eta_communication, ris_code, eta_jamming, heading, and speed from "
+        "template_id. For pair=0, eta_near is ignored and the sensing-only value is used. "
+        "For pair>0, eta_near must be in [0, maximum_eta_near] and eta_cpu in [0,1]. "
+        "reason_codes MUST be a JSON array of at most three short strings; do not put "
+        "template_id or correction fields in it. Do not emit any keys other than "
+        "template_id, eta_near, eta_cpu, reason_codes, and confidence inside candidates. "
         "The verifier already evaluates every safe template and a greedy baseline, so "
-        "use these candidates for state-specific choices of template, eta_near, and "
-        "eta_cpu rather than reserving positions for coverage. Return only JSON with "
-        "schema_version=1, the exact state_id, and a candidates array. Each candidate "
-        "must contain template_id, eta_near, eta_cpu, reason_codes, and confidence in [0,1]."
+        "use these candidates for state-specific choices rather than reserving positions "
+        "for coverage. Return only JSON with schema_version=1, the exact state_id, and a "
+        "candidates array. Each candidate must contain template_id, eta_near, eta_cpu, "
+        "reason_codes, and confidence in [0,1]."
     )
     prompt = f"{instructions}\nINPUT_JSON={json.dumps(task, sort_keys=True)}"
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()

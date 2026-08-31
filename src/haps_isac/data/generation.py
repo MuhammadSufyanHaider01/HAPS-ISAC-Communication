@@ -485,6 +485,7 @@ def _log_valid_request(
             prompt=request.prompt,
             raw_response=call.raw_text,
             reasoning_response=call.reasoning_text,
+            response_normalization_notes=parsed.normalization_notes,
         ),
     )
 
@@ -651,6 +652,8 @@ def _verify_and_log(
                 candidate_source_label=candidate.source_label,
                 reason_codes=candidate.reason_codes,
                 template_id=template_id,
+                template_id_raw=candidate.template_id_raw,
+                template_resolution=candidate.template_resolution,
                 template_compliant=is_template_compliant,
                 teacher_confidence=candidate.confidence,
                 proposed_action=action_as_dict(evaluation.proposed_action),
@@ -965,6 +968,7 @@ def generate_demonstrations(
                     )
                     parsed = canonicalize_teacher_response(parsed, prompt)
                 except TeacherResponseError as error:
+                    parsed = None
                     parse_error = str(error)
             if parsed is None:
                 _log_invalid_request(

@@ -17,7 +17,7 @@ class CandidatePayload(BaseModel):
     template_id: str = Field(min_length=1, max_length=64)
     eta_near: float = Field(ge=0.0, le=0.5)
     eta_cpu: float = Field(ge=0.0, le=1.0)
-    reason_codes: tuple[str, ...] = Field(default=(), max_length=12)
+    reason_codes: tuple[str, ...] = Field(default=(), max_length=3)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     # Accepted for transport compatibility; canonicalization ignores these
     # template-controlled values and reconstructs them from ``template_id``.
@@ -48,6 +48,8 @@ class ParsedCandidate:
     confidence: float
     canonical_key: tuple[int | float, ...]
     template_id: str | None = None
+    template_id_raw: str | None = None
+    template_resolution: str = "raw"
     source: str = "teacher"
     source_label: str = "teacher_response"
 
@@ -57,6 +59,7 @@ class ParsedTeacherResponse:
     schema_version: int
     state_id: str
     candidates: tuple[ParsedCandidate, ...]
+    normalization_notes: tuple[str, ...] = ()
 
     @property
     def unique_candidate_count(self) -> int:
@@ -65,6 +68,44 @@ class ParsedTeacherResponse:
 
 class TeacherResponseError(ValueError):
     """The teacher response is unusable as a verified candidate set."""
+
+
+def _normalize_payload(value: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Apply only bounded repairs for recurring provider formatting mistakes."""
+
+    normalized = dict(value)
+    raw_candidates = normalized.get("candidates")
+    if not isinstance(raw_candidates, (list, tuple)):
+        return normalized, ()
+    notes: list[str] = []
+    candidates: list[Any] = []
+    for index, raw_candidate in enumerate(raw_candidates):
+        if not isinstance(raw_candidate, dict):
+            candidates.append(raw_candidate)
+            continue
+        candidate = dict(raw_candidate)
+        if "template_id_actual" in candidate:
+            # The provider has occasionally emitted a correction under
+            # ``template_id_actual``.  Prefer that explicitly named corrected
+            # value, while retaining the unmodified response in the request log.
+            actual = candidate.pop("template_id_actual")
+            if "template_id" not in candidate:
+                candidate["template_id"] = actual
+                notes.append(f"candidate[{index}].template_id_actual->template_id")
+            elif candidate["template_id"] == actual:
+                notes.append(f"candidate[{index}].template_id_actual_duplicate_removed")
+            else:
+                candidate["template_id"] = actual
+                notes.append(f"candidate[{index}].template_id_conflict_prefer_actual")
+        if isinstance(candidate.get("reason_codes"), str):
+            candidate["reason_codes"] = [candidate["reason_codes"]]
+            notes.append(f"candidate[{index}].reason_codes_string_to_array")
+        if "reason_codes_override" in candidate:
+            del candidate["reason_codes_override"]
+            notes.append(f"candidate[{index}].reason_codes_override_removed")
+        candidates.append(candidate)
+    normalized["candidates"] = candidates
+    return normalized, tuple(notes)
 
 
 def _extract_object(raw_text: str) -> dict[str, Any]:
@@ -93,8 +134,10 @@ def parse_teacher_response(
     expected_candidates: int,
     num_pairs: int,
 ) -> ParsedTeacherResponse:
+    raw_payload = _extract_object(raw_text)
+    normalized_payload, normalization_notes = _normalize_payload(raw_payload)
     try:
-        payload = ResponsePayload.model_validate(_extract_object(raw_text))
+        payload = ResponsePayload.model_validate(normalized_payload)
     except (ValidationError, ValueError, TypeError) as error:
         raise TeacherResponseError(str(error)) from error
     if payload.schema_version != 1:
@@ -107,6 +150,17 @@ def parse_teacher_response(
         )
 
     _ = num_pairs  # retained in the public API for caller compatibility
+    raw_candidate_values = raw_payload.get("candidates")
+    raw_template_ids = (
+        tuple(
+            raw_candidate.get("template_id")
+            if isinstance(raw_candidate, dict)
+            else None
+            for raw_candidate in raw_candidate_values
+        )
+        if isinstance(raw_candidate_values, (list, tuple))
+        else ()
+    )
     parsed: list[ParsedCandidate] = []
     for index, item in enumerate(payload.candidates):
         action = HighLevelAction(
@@ -133,10 +187,16 @@ def parse_teacher_response(
                 confidence=item.confidence,
                 canonical_key=canonical,
                 template_id=item.template_id,
+                template_id_raw=(
+                    raw_template_ids[index]
+                    if index < len(raw_template_ids)
+                    else item.template_id
+                ),
             )
         )
     return ParsedTeacherResponse(
         schema_version=payload.schema_version,
         state_id=payload.state_id,
         candidates=tuple(parsed),
+        normalization_notes=normalization_notes,
     )

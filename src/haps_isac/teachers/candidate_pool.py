@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +19,8 @@ from haps_isac.teachers.response_parser import (
     ParsedTeacherResponse,
     TeacherResponseError,
 )
+
+MAX_NEAREST_TEMPLATE_WATT_DISTANCE = 8.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +75,8 @@ def _safe_template_candidates(
                     confidence=0.0,
                     canonical_key=canonical_action_key(action),
                     template_id=template_id,
+                    template_id_raw=template_id,
+                    template_resolution="exact",
                     source="safe_template",
                     source_label=f"{template_id}:cpu={cpu:.3f}",
                 )
@@ -92,31 +97,73 @@ def _template_base_matches(action: HighLevelAction, template: dict[str, Any]) ->
     )
 
 
+def _normalize_template_identifier(value: str) -> str:
+    return value.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _nearest_available_template_id(
+    raw_id: str,
+    templates: dict[str, dict[str, Any]],
+) -> str | None:
+    match = re.fullmatch(r"p(\d+)_sense(\d+(?:\.\d+)?)w", _normalize_template_identifier(raw_id))
+    if match is None:
+        return None
+    pair = int(match.group(1))
+    sensing_watts = float(match.group(2))
+    candidates: list[tuple[float, str]] = []
+    for template_id, template in templates.items():
+        if int(template["pair"]) != pair:
+            continue
+        template_match = re.fullmatch(
+            r"p(\d+)_sense(\d+(?:\.\d+)?)w",
+            _normalize_template_identifier(template_id),
+        )
+        if template_match is not None:
+            candidates.append((abs(float(template_match.group(2)) - sensing_watts), template_id))
+    if not candidates:
+        return None
+    distance, template_id = min(candidates, key=lambda item: (item[0], item[1]))
+    return template_id if distance <= MAX_NEAREST_TEMPLATE_WATT_DISTANCE else None
+
+
 def _resolve_template_id(
     candidate: ParsedCandidate,
     templates: dict[str, dict[str, Any]],
-) -> str | None:
-    raw_id = (candidate.template_id or "").strip()
+) -> tuple[str | None, str]:
+    normalized_id = (candidate.template_id or "").strip()
+    raw_id = (candidate.template_id_raw or normalized_id).strip()
+    if normalized_id in templates:
+        resolution = (
+            "exact"
+            if not candidate.template_id_raw or candidate.template_id_raw == normalized_id
+            else "normalized_template_id"
+        )
+        return normalized_id, resolution
     if raw_id in templates:
-        return raw_id
+        return raw_id, "exact"
     for reason in candidate.reason_codes:
         if reason in templates:
-            return reason
-    normalized = raw_id.lower().replace("-", "_").replace(" ", "_")
+            return reason, "reason_code_alias"
+    normalized = _normalize_template_identifier(raw_id)
     for template_id in sorted(templates, key=len, reverse=True):
-        if normalized.startswith(template_id.lower() + "_"):
-            return template_id
+        if normalized.startswith(_normalize_template_identifier(template_id) + "_"):
+            return template_id, "template_id_suffix_alias"
     for reason in candidate.reason_codes:
-        normalized_reason = reason.lower().replace("-", "_").replace(" ", "_")
+        normalized_reason = _normalize_template_identifier(reason)
         for template_id in sorted(templates, key=len, reverse=True):
-            if normalized_reason.startswith(template_id.lower() + "_"):
-                return template_id
+            if normalized_reason.startswith(_normalize_template_identifier(template_id) + "_"):
+                return template_id, "reason_code_suffix_alias"
     matches = [
         template_id
         for template_id, template in templates.items()
         if _template_base_matches(candidate.action, template)
     ]
-    return matches[0] if len(matches) == 1 else None
+    if len(matches) == 1:
+        return matches[0], "numeric_action_alias"
+    nearest = _nearest_available_template_id(raw_id, templates)
+    if nearest is not None:
+        return nearest, "nearest_available_template"
+    return None, "unresolved"
 
 
 def canonicalize_teacher_response(
@@ -127,17 +174,22 @@ def canonicalize_teacher_response(
 
     ``template_id`` is authoritative for pair and fixed physical controls. Known
     aliases from older model behavior are resolved using the explicit id, reason
-    codes, or an unambiguous numeric template match; the raw response remains in
-    the request log for audit.
+    codes, an unambiguous numeric template match, or a bounded nearest watt
+    match within the same pair. Nearest matching is limited to the adjacent
+    configured sensing-power level, never an arbitrary hallucinated wattage.
+    The raw identifier and resolution method are
+    retained in candidate logs so repaired model output cannot be mistaken for
+    exact contract compliance.
     """
 
     templates = _template_lookup(artifact)
     canonical_candidates: list[ParsedCandidate] = []
     for candidate in parsed.candidates:
-        template_id = _resolve_template_id(candidate, templates)
+        template_id, template_resolution = _resolve_template_id(candidate, templates)
         if template_id is None:
             raise TeacherResponseError(
-                f"candidate {candidate.candidate_index} has no resolvable template_id"
+                f"candidate {candidate.candidate_index} has no resolvable template_id "
+                f"({candidate.template_id_raw or candidate.template_id!r})"
             )
         template = templates[template_id]
         default_near = float(template["eta_near"]) if "eta_near" in template else 0.0
@@ -166,6 +218,8 @@ def canonicalize_teacher_response(
                 confidence=candidate.confidence,
                 canonical_key=canonical_action_key(action),
                 template_id=template_id,
+                template_id_raw=candidate.template_id_raw,
+                template_resolution=template_resolution,
                 source=candidate.source,
                 source_label=candidate.source_label,
             )
@@ -174,6 +228,7 @@ def canonicalize_teacher_response(
         schema_version=parsed.schema_version,
         state_id=parsed.state_id,
         candidates=tuple(canonical_candidates),
+        normalization_notes=parsed.normalization_notes,
     )
 
 
@@ -205,6 +260,8 @@ def build_candidate_pool(
                     confidence=candidate.confidence,
                     canonical_key=candidate.canonical_key,
                     template_id=candidate.template_id,
+                    template_id_raw=candidate.template_id_raw,
+                    template_resolution=candidate.template_resolution,
                     source=candidate.source,
                     source_label=candidate.source_label,
                 )
@@ -223,6 +280,8 @@ def build_candidate_pool(
             confidence=0.0,
             canonical_key=canonical_action_key(greedy_action),
             template_id=None,
+            template_id_raw=None,
+            template_resolution="baseline",
             source="greedy_baseline",
             source_label="urgency_greedy",
         )

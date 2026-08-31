@@ -135,6 +135,7 @@ class TeacherRequestLog:
     prompt: str
     raw_response: str
     reasoning_response: str | None
+    response_normalization_notes: tuple[str, ...] = ()
     logged_at: str = field(default_factory=utc_now)
 
 
@@ -149,6 +150,8 @@ class CandidateLogRecord:
     candidate_source_label: str
     reason_codes: tuple[str, ...]
     template_id: str | None
+    template_id_raw: str | None
+    template_resolution: str
     template_compliant: bool | None
     teacher_confidence: float
     proposed_action: dict[str, Any]
