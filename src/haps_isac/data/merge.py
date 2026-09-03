@@ -3,12 +3,43 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 from haps_isac.data.dataset_writer import TABLES, DatasetWriter
 from haps_isac.data.demonstration_schema import RunManifest, utc_now
+
+# These are the stable experiment controls captured in every shard manifest.
+# Runtime metadata (endpoint, host, Slurm job ID, timestamps, and software
+# versions) must not determine whether two shards belong to one experiment.
+_CONFIGURATION_FIELDS = (
+    "schema_version",
+    "system_config_path",
+    "teacher_config_path",
+    "teacher_provider",
+    "teacher_model_id",
+    "teacher_model_revision",
+    "prompt_version",
+    "master_seed",
+    "num_candidates",
+    "rollout_horizon_slots",
+    "monte_carlo_rollouts",
+    "max_monte_carlo_rollouts",
+    "sampling_strategy",
+    "state_distribution",
+    "split_fractions",
+    "candidate_pool_config",
+)
+
+
+def _manifest_configuration_fingerprint(manifest: dict[str, Any]) -> str:
+    """Hash only stable manifest controls for legacy-shard compatibility."""
+
+    payload = {field: manifest.get(field) for field in _CONFIGURATION_FIELDS}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _load_manifest(directory: Path) -> dict[str, Any]:
@@ -37,11 +68,20 @@ def _validate_shards(
         raise ValueError(f"manifests expect {shard_count} shards, not {expected_shards}")
     if len(manifests) != shard_count:
         raise ValueError(f"found {len(manifests)} of {shard_count} required shards")
-    configuration_hashes = {str(manifest["configuration_hash"]) for manifest in manifests}
+    # Older shards hashed the per-task localhost teacher endpoint. Validate a
+    # canonical manifest fingerprint instead so those shards remain mergeable,
+    # while still rejecting genuine experiment/configuration mismatches.
+    configuration_fingerprints = {
+        _manifest_configuration_fingerprint(manifest) for manifest in manifests
+    }
     total_states = {int(manifest["total_requested_states"]) for manifest in manifests}
     master_seeds = {int(manifest["master_seed"]) for manifest in manifests}
     commits = {str(manifest["git_commit"]) for manifest in manifests}
-    if len(configuration_hashes) != 1 or len(total_states) != 1 or len(master_seeds) != 1:
+    if (
+        len(configuration_fingerprints) != 1
+        or len(total_states) != 1
+        or len(master_seeds) != 1
+    ):
         raise ValueError("shard configuration, total-state count, or master seed differs")
     if len(commits) != 1 or any(bool(manifest.get("git_dirty", True)) for manifest in manifests):
         raise ValueError("all shards must use the same clean Git commit")
@@ -80,7 +120,7 @@ def _merged_manifest(
         completed_at=None,
         git_commit=str(first["git_commit"]),
         git_dirty=False,
-        configuration_hash=str(first["configuration_hash"]),
+        configuration_hash=_manifest_configuration_fingerprint(first),
         system_config_path=str(first["system_config_path"]),
         teacher_config_path=str(first["teacher_config_path"]),
         teacher_provider=str(first["teacher_provider"]),

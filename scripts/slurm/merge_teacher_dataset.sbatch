@@ -19,8 +19,14 @@ dataset_root="${HAPS_DATASET_ROOT:-datasets/${run_id}}"
 merged_run_id="${HAPS_MERGED_RUN_ID:-${run_id}-merged}"
 merged_output="${HAPS_MERGED_OUTPUT:-${dataset_root}/merged}"
 
-"${python_environment}/bin/python" scripts/merge_teacher_shards.py \
-  --shard-root "${dataset_root}/shards" \
-  --output "${merged_output}" \
-  --run-id "${merged_run_id}" \
+merge_args=(
+  --shard-root "${dataset_root}/shards"
+  --output "${merged_output}"
+  --run-id "${merged_run_id}"
   --expected-shards "${shard_count}"
+)
+if [[ "${HAPS_ALLOW_FAILED_GATES:-0}" == "1" ]]; then
+  merge_args+=(--allow-failed-gates)
+fi
+
+"${python_environment}/bin/python" scripts/merge_teacher_shards.py "${merge_args[@]}"

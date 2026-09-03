@@ -7,6 +7,7 @@ Implemented and tested:
 - `merge_teacher_shards.py`: validated shard merge, aggregate audit, and scale-up gate enforcement.
 - `audit_demonstrations.py`: dataset integrity and teacher-quality gate.
 - `report_teacher_quality.py`: repair, confidence, state-difficulty, and baseline diagnostics.
+- `prepare_distillation_view.py`: filter the merged logs to demonstrations with valid soft targets without new teacher queries.
 - `benchmark_teachers.py`: frozen-state, common-random-number teacher tournament.
 - `slurm/`: non-launching teacher serving, resumable GPU arrays, and dependent CPU merge templates.
 

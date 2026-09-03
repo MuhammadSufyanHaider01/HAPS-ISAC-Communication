@@ -21,7 +21,16 @@ def utc_now() -> str:
 
 
 def configuration_hash(*configs: BaseModel) -> str:
-    payload = [config.model_dump(mode="json") for config in configs]
+    # The OpenAI-compatible endpoint is a runtime detail. In Slurm arrays each
+    # task gets a different localhost port, so including ``base_url`` would make
+    # otherwise identical shards impossible to merge. Keep all experiment
+    # controls in the hash while excluding only this transport address.
+    payload = []
+    for config in configs:
+        dumped = config.model_dump(mode="json")
+        if isinstance(dumped, dict) and "base_url" in dumped:
+            dumped.pop("base_url")
+        payload.append(dumped)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 

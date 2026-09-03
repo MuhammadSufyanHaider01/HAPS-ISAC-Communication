@@ -88,6 +88,21 @@ datasets/<run-id>/
     teacher_quality_report.json
 ~~~
 
+For a completed run whose raw shards are valid but whose scale-up gate is below
+the production threshold, the merge can be retained for diagnosis by setting
+`HAPS_ALLOW_FAILED_GATES=1`. The canonical JSONL tables and quality report are
+then preserved; the flag never changes the reported metrics. To create a
+distillation-only view without issuing new teacher queries, run:
+
+~~~bash
+.venv/bin/python scripts/prepare_distillation_view.py \
+  datasets/<run-id>/merged \
+  datasets/<run-id>/distillation
+~~~
+
+The view contains only demonstrations with valid normalized soft targets and
+records the excluded-state count in `distillation_manifest.json`.
+
 Runtime overrides include
 `HAPS_TEACHER_MODEL`, `HAPS_TEACHER_REVISION`, `HAPS_TEACHER_BACKEND`,
 `HAPS_DATASET_STATES`, `HAPS_SHARD_COUNT`, `HAPS_MAX_PARALLEL_SHARDS`,
