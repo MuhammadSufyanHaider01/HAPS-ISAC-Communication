@@ -103,6 +103,37 @@ distillation-only view without issuing new teacher queries, run:
 The view contains only demonstrations with valid normalized soft targets and
 records the excluded-state count in `distillation_manifest.json`.
 
+## Gemma 4 E4B distillation
+
+train_student.py serializes the causal numerical observation, appends the
+ACTION sentinel, and trains only LoRA adapters plus the structured action,
+value, and constraint heads. Teacher reasoning is never loaded into the
+student input. The default configuration uses QLoRA NF4, BF16 compute, batch
+size 8, and gradient accumulation of 8.
+
+Validate the dataset and resolved training plan without downloading Gemma:
+
+~~~bash
+.venv/bin/python scripts/train_student.py \
+  --dataset datasets/qwen3.5-27b-production-5000-v2.2-001/distillation \
+  --config configs/distillation.yaml \
+  --output /tmp/haps-gemma-plan \
+  --dry-run
+~~~
+
+Submit the 24-hour GPU training job after installing the student extra
+(peft and bitsandbytes):
+
+~~~bash
+HAPS_DISTILL_DATASET=datasets/qwen3.5-27b-production-5000-v2.2-001/distillation \
+HAPS_PYTHON_ENVIRONMENT=.venv-gpu \
+sbatch scripts/slurm/train_student.sbatch
+~~~
+
+Override the Slurm partition with sbatch --partition=<available-gpu-partition>
+when the default H100 partition is occupied. Check metrics.jsonl,
+training_summary.json, and checkpoints/best/ in the output directory.
+
 Runtime overrides include
 `HAPS_TEACHER_MODEL`, `HAPS_TEACHER_REVISION`, `HAPS_TEACHER_BACKEND`,
 `HAPS_DATASET_STATES`, `HAPS_SHARD_COUNT`, `HAPS_MAX_PARALLEL_SHARDS`,

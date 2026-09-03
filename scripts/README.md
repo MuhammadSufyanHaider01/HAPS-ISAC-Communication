@@ -7,15 +7,15 @@ Implemented and tested:
 - `merge_teacher_shards.py`: validated shard merge, aggregate audit, and scale-up gate enforcement.
 - `audit_demonstrations.py`: dataset integrity and teacher-quality gate.
 - `report_teacher_quality.py`: repair, confidence, state-difficulty, and baseline diagnostics.
-- `prepare_distillation_view.py`: filter the merged logs to demonstrations with valid soft targets without new teacher queries.
+- `prepare_distillation_view.py`: filter merged logs to demonstrations with valid soft targets without new teacher queries.
 - `benchmark_teachers.py`: frozen-state, common-random-number teacher tournament.
-- `slurm/`: non-launching teacher serving, resumable GPU arrays, and dependent CPU merge templates.
+- `train_student.py`: Gemma 4 E4B structured-action QLoRA/LoRA distillation with validation metrics and checkpoints.
+- `slurm/`: teacher serving, resumable GPU arrays, dependent CPU merge, and Gemma distillation templates.
 
 Reserved for later phases:
 
-- `train_student.py` (Gemma 4 E4B action distillation with QLoRA/LoRA adapters)
 - `collect_active_queries.py`
 - `train_constrained_ppo.py`
 - `evaluate_all.py`
 
-Reserved commands remain placeholders until their underlying learning modules are implemented and tested.
+Active correction, PPO refinement, and end-to-end evaluation remain reserved for later phases.

@@ -6,9 +6,9 @@ Simulator-verified reasoning distillation and constrained reinforcement learning
 
 The validated Version 1 research environment is implemented. It includes fixed near/far NOMA pairs, causal communication and target sensing, target/eavesdropper reception, AoI/AoLI/AoSI, EKF tracking, CPU-delayed estimate availability, virtual queues, physical action completion, deterministic repair/fallback, reproducible state cloning, random and greedy baselines, and a reduced-grid one-step oracle.
 
-The offline teacher-generation phase is implemented through schema v5: Qwen/Gemma-compatible adapters, causal versioned prompts, strict parsing, content-addressed caching, adaptive common-random rollout verification, practical-equivalence soft labels, exact stratified sampling, plotting-ready linked logs, crash-resumable shards, validated merging, dataset auditing, and Slurm workflows. The complete path passes deterministic mock-teacher resume/merge tests; the final production Qwen dataset has not yet been generated.
+The offline teacher-generation phase is implemented through schema v5: Qwen/Gemma-compatible adapters, causal versioned prompts, strict parsing, content-addressed caching, adaptive common-random rollout verification, practical-equivalence soft labels, exact stratified sampling, plotting-ready linked logs, crash-resumable shards, validated merging, dataset auditing, and Slurm workflows. The 5,000-state production Qwen run has been merged and a verified 4,893-example distillation view has been materialized without re-querying the teacher.
 
-Version 2 components—RIS, AAV jamming and mobility, residual self-interference, imperfect CSI/SIC, and stochastic blockage—remain disabled behind the configuration contract. Student distillation, active correction, and constrained PPO have not started. The planned primary student is the open-weight Gemma 4 E4B instruction model, adapted with QLoRA/LoRA; it will consume the causal state and learn verified numerical actions, not teacher reasoning text. A compact numerical policy remains an optional low-latency ablation.
+Version 2 components—RIS, AAV jamming and mobility, residual self-interference, imperfect CSI/SIC, and stochastic blockage—remain disabled behind the configuration contract. Gemma 4 E4B structured-action distillation is implemented but has not yet been trained. It consumes the causal state and learns verified numerical actions, not teacher reasoning text. Active correction and constrained PPO remain later phases; a compact numerical policy remains an optional low-latency ablation.
 
 ## Design documents
 
@@ -60,7 +60,7 @@ Run all quality gates:
 .venv/bin/python scripts/validate_environment.py --steps 5000
 ```
 
-When implementing student distillation, install the optional PEFT stack with `.venv/bin/python -m pip install -e '.[student]'`; it provides `peft` and `bitsandbytes` for QLoRA/LoRA alongside the existing transformer dependency.
+For student distillation, install the optional PEFT stack with `.venv/bin/python -m pip install -e '.[student]'`; it provides `peft` and `bitsandbytes` for QLoRA/LoRA alongside the existing transformer dependency. Use `scripts/train_student.py --dry-run` to validate a dataset/config before loading Gemma.
 
 The validation command checks deterministic replay, candidate-evaluation isolation, observation/action invariants, random and urgency-greedy stress rollouts, hard feasibility, repair/fallback rates, and a common-seed one-step grid oracle.
 

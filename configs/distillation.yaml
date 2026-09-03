@@ -2,11 +2,30 @@ schema_version: 1
 optimizer: adamw
 learning_rate: 3.0e-4
 weight_decay: 1.0e-4
-batch_size: 512
-max_epochs: 200
+batch_size: 8
+gradient_accumulation_steps: 8
+max_epochs: 40
 gradient_clip_norm: 1.0
-early_stopping_patience: 20
+early_stopping_patience: 5
 categorical_label_smoothing: 0.02
+seed: 20260824
+device: auto
+precision: bf16
+
+# The continuous term uses the same transformed density that PPO will use.
+# Constraint targets are optional in the current verified view and are masked
+# until per-constraint outcomes are added by active correction.
+loss_weights:
+  categorical: 1.0
+  continuous: 1.0
+  value: 0.10
+  constraint: 0.10
+  auxiliary: 0.0
+
+num_scheduling_actions: 5  # four NOMA pairs plus the sensing-only action
+num_ris_actions: 1         # Version 1 has RIS disabled
+constraint_dim: 5
+bottleneck_size: 512
 
 # Primary 4B-class student. E4B is approximately 4.5B effective parameters
 # (about 8B total including embeddings), not exactly 4B total.
