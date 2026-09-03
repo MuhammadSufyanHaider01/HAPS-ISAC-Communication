@@ -108,20 +108,17 @@ Optionally log and plot the total distillation loss during offline student train
 
 The central paper figures should establish physical-layer and cross-layer operating principles, rather than only rank learning algorithms. Use an exhaustive or strong model-based reference on small instances to validate each physical effect, then show that the proposed student reproduces it at deployment scale. The student is the scalable controller; the wireless-system insight is the contribution.
 
-### 1. NOMA versus OMA Operating-Region Map (Highest Priority)
+### 1. NOMA versus OMA versus Semi-NOMA Sum-Rate Study (Highest Priority)
 
-Study when power-domain NOMA is preferable to OMA for secure, freshness-aware HAPS-ISAC control. Compare NOMA and OMA under the same time-bandwidth, power, sensing, completion, and safety constraints; add semi-NOMA if a fair implementation is available.
+Compare pure power-domain NOMA, OMA, and a formally defined downlink semi-NOMA mode under the same total time-bandwidth, HAPS transmit-power, sensing-resource, completion, and safety constraints. This initial study is intentionally restricted to the network sum rate; freshness, secrecy, sensing, energy, and feasibility metrics belong to separate experiments.
 
-Vary jointly:
+Vary the number of served NOMA clusters \(N\) while evaluating all three access modes on the same topology/channel scenario bank. Keep the total system bandwidth and HAPS power fixed, specify whether offered traffic is held per cluster or in total, and use the same near/far pairing rule or association policy wherever it applies.
 
-- near/far cluster radial geometry and channel-gain disparity;
-- offered update load and cluster traffic imbalance;
-- spatial separation between clusters; and
-- residual SIC and CSI error after Version 2 imperfections are enabled.
+The main result is average network sum rate versus \(N\), with confidence intervals. For semi-NOMA, optimize or sweep the orthogonal resource fraction \(\eta\), where \(\eta=1\) gives OMA and \(\eta=0\) gives pure NOMA; optionally report the sum-rate-optimal \(\eta^*\) versus \(N\).
 
-Report a two-dimensional operating-region map showing the preferred access mode, 95th-percentile AoLI/AoSI, secrecy-outage probability, tracking error, and feasibility. The intended output is an empirically verified NOMA-viability boundary, not a predetermined claim that NOMA always wins.
+The sum-rate crossover points identify the studied regimes in which OMA is no longer sum-rate preferred and where semi-NOMA or pure NOMA provides the larger gain. State this narrowly as a sum-rate result, not as a general dominance claim.
 
-Prerequisite: add a comparable OMA control path to the simulator/action-completion layer before final student training.
+Prerequisite: add comparable OMA and downlink semi-NOMA control paths to the simulator/action-completion layer before final student training.
 
 ### 2. Sensing-Secrecy-Tracking Geometry Map
 
