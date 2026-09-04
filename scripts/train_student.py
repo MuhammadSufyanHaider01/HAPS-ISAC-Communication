@@ -153,7 +153,12 @@ def _load_transformers_student(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     action_token = "<ACTION>"
-    if action_token not in tokenizer.additional_special_tokens:
+    # Transformers 5.x GemmaTokenizer does not expose the legacy
+    # ``additional_special_tokens`` attribute.  ``getattr`` keeps this
+    # compatible with both tokenizer implementations; add_special_tokens is
+    # idempotent when the token is already registered.
+    additional_special_tokens = getattr(tokenizer, "additional_special_tokens", ())
+    if action_token not in additional_special_tokens:
         tokenizer.add_special_tokens({"additional_special_tokens": [action_token]})
 
     dtype = torch.bfloat16 if config.compute_dtype.lower() == "bfloat16" else torch.float16
