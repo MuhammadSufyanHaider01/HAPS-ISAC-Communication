@@ -14,6 +14,7 @@ from haps_isac.training.distill_trainer import (
     build_distillation_targets,
     serialize_causal_observation,
 )
+from scripts.train_student import _resolve_lora_target_modules
 
 
 def _observation() -> dict[str, Any]:
@@ -81,6 +82,15 @@ class _FakeBackbone(nn.Module):
         return SimpleNamespace(last_hidden_state=self.embedding(input_ids))
 
 
+class _ClippableLinear(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(4, 4, bias=False)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.linear(inputs)
+
+
 def test_state_serialization_is_causal_and_deterministic() -> None:
     text = serialize_causal_observation(_observation())
     assert text == serialize_causal_observation(_observation())
@@ -98,6 +108,16 @@ def test_soft_targets_are_padded_and_normalized() -> None:
         torch.ones(1),
     )
     assert arrays["selected_continuous"][0, 2] == 0.4
+
+
+def test_lora_targets_resolve_nested_gemma4_linear_wrappers() -> None:
+    backbone = nn.Module()
+    backbone.q_proj = _ClippableLinear()
+    backbone.k_proj = nn.Linear(4, 4, bias=False)
+    assert _resolve_lora_target_modules(backbone, ("q_proj", "k_proj")) == (
+        "k_proj",
+        "q_proj.linear",
+    )
 
 
 def test_structured_student_forward_and_cpu_training(tmp_path: Path) -> None:

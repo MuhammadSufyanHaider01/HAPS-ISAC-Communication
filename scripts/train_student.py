@@ -135,6 +135,51 @@ def _training_plan(
     }
 
 
+def _is_lora_compatible_module(module: torch.nn.Module) -> bool:
+    """Return whether PEFT can replace the module with a LoRA layer."""
+
+    # bitsandbytes quantized layers are not torch.nn.Linear subclasses, but
+    # PEFT has dedicated dispatchers for these concrete layer types.
+    return isinstance(module, torch.nn.Linear) or module.__class__.__name__ in {
+        "Linear4bit",
+        "Linear8bitLt",
+    }
+
+
+def _resolve_lora_target_modules(
+    backbone: torch.nn.Module,
+    configured_targets: tuple[str, ...] | list[str],
+) -> tuple[str, ...]:
+    """Resolve configured projection names through Gemma4 wrapper modules.
+
+    Transformers 5.x wraps several Gemma4 projections in
+    ``Gemma4ClippableLinear``.  PEFT cannot replace that wrapper directly,
+    while its nested ``linear`` child is a supported ``Linear`` or
+    ``Linear4bit`` layer.  Returning exact module paths avoids accidentally
+    matching the unsupported wrapper elsewhere in the model.
+    """
+
+    targets = tuple(str(value) for value in configured_targets)
+    resolved: set[str] = set()
+    for name, module in backbone.named_modules():
+        if not name:
+            continue
+        if not any(name == target or name.endswith(f".{target}") for target in targets):
+            continue
+        if _is_lora_compatible_module(module):
+            resolved.add(name)
+            continue
+        nested_linear = getattr(module, "linear", None)
+        if isinstance(nested_linear, torch.nn.Module) and _is_lora_compatible_module(nested_linear):
+            resolved.add(f"{name}.linear")
+    if not resolved:
+        raise RuntimeError(
+            "none of the configured LoRA target modules were found as supported linear layers; "
+            f"requested={list(targets)}"
+        )
+    return tuple(sorted(resolved))
+
+
 def _load_transformers_student(
     config: DistillationConfig,
 ) -> tuple[Any, GemmaStructuredStudent]:
@@ -211,7 +256,7 @@ def _load_transformers_student(
         r=config.lora_rank,
         lora_alpha=config.lora_alpha,
         lora_dropout=config.lora_dropout,
-        target_modules=list(config.target_modules),
+        target_modules=list(_resolve_lora_target_modules(backbone, config.target_modules)),
         bias="none",
         task_type="FEATURE_EXTRACTION",
     )
